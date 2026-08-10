@@ -263,12 +263,18 @@ public class PeopleAdminTools
         return ToolRunner.RunWriteAsync(_connection, "MoveOrgUnits", $"ids={unitIds}, parent={newParentId}", async () =>
         {
             _connection.EnsureConnected();
-            var ids = unitIds.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries)
-                .Select(s => int.TryParse(s, out var id) ? id : -1)
-                .Where(id => id > 0)
-                .ToArray();
+            // Некорректные элементы отклоняем явно: молчаливый пропуск перенёс бы часть
+            // оргединиц и отрапортовал успех.
+            var tokens = unitIds.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
+            var ids = new int[tokens.Length];
+            for (var i = 0; i < tokens.Length; i++)
+            {
+                if (!int.TryParse(tokens[i], out var id) || id <= 0)
+                    return ToolResult.Error($"Некорректный ID оргединицы: '{tokens[i]}'.");
+                ids[i] = id;
+            }
             if (ids.Length == 0)
-                return ToolResult.Error("Не указаны корректные ID оргединиц.");
+                return ToolResult.Error("Не указаны ID оргединиц.");
 
             await _connection.WithAdminApiAsync<object?>(async admin =>
             {
@@ -312,18 +318,20 @@ public class PeopleAdminTools
         return ToolRunner.RunWriteAsync(_connection, "RemovePersonFromPosition", $"position={positionId}", async () =>
         {
             _connection.EnsureConnected();
-            await _connection.WithAdminApiAsync<object?>(async admin =>
+            var removedPersonId = await _connection.WithAdminApiAsync(async admin =>
             {
                 var unit = await FindOrgUnitAsync(admin, positionId);
+                if (unit.Person <= 0)
+                    throw new InvalidOperationException($"На должности #{positionId} никто не назначен.");
                 await admin.SetPeopleOnPositionAsync(_connection.DatabaseName, new DPersonOnPositionData
                 {
                     PositionId = positionId,
-                    Person = unit.Person > 0 ? unit.Person : null,
+                    Person = unit.Person,
                     IsRemoving = true,
                 });
-                return null;
+                return unit.Person;
             });
-            return ToolResult.Ok($"Должность #{positionId} освобождена.");
+            return ToolResult.Ok($"Должность #{positionId} освобождена (снят пользователь #{removedPersonId}).");
         });
     }
 

@@ -147,7 +147,7 @@ public class McpTestClient : IAsyncDisposable
             var readTask = Task.Run(() => _stdout!.ReadLine());
 
             if (!readTask.Wait(remaining))
-                throw new TimeoutException($"Timeout ({timeoutMs}ms) waiting for {method} id={id}");
+                throw new TimeoutException($"Timeout ({timeoutMs}ms) waiting for {method} id={id}{Diagnostics()}");
 
             var line = readTask.Result;
             if (string.IsNullOrWhiteSpace(line)) continue;
@@ -159,7 +159,24 @@ public class McpTestClient : IAsyncDisposable
                 return json;
         }
 
-        throw new TimeoutException($"Timeout ({timeoutMs}ms) waiting for {method} id={id}");
+        throw new TimeoutException($"Timeout ({timeoutMs}ms) waiting for {method} id={id}{Diagnostics()}");
+    }
+
+    /// <summary>Состояние процесса и хвост stderr — чтобы таймаут не был безмолвным.</summary>
+    private string Diagnostics()
+    {
+        var sb = new StringBuilder();
+        if (_process is { HasExited: true } p)
+            sb.Append($" Процесс PilotMCP завершился с кодом {p.ExitCode}.");
+
+        var tail = GetStderrTail();
+        if (tail.Length > 0)
+        {
+            sb.AppendLine();
+            sb.AppendLine("Последние строки stderr PilotMCP:");
+            sb.AppendLine(string.Join(Environment.NewLine, tail.TakeLast(20)));
+        }
+        return sb.ToString();
     }
 
     private static JsonObject? TryParseJson(string text)
@@ -170,28 +187,29 @@ public class McpTestClient : IAsyncDisposable
 
     private static string FindExePath()
     {
-        var candidates = new[]
-        {
-            Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "bin", "Release", "net8.0", "PilotMCP.exe"),
-            Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "bin", "Debug", "net8.0", "PilotMCP.exe"),
-        };
-
-        // Из существующих сборок берём самую свежую — стабильный порядок (Release-first)
-        // приводил к прогону тестов на устаревшем exe.
-        var newest = candidates
-            .Select(Path.GetFullPath)
-            .Where(File.Exists)
-            .OrderByDescending(File.GetLastWriteTimeUtc)
-            .FirstOrDefault();
-        if (newest != null) return newest;
-
+        // Явное указание пути имеет приоритет над выведенным.
         var envPath = Environment.GetEnvironmentVariable("PILOTMCP_EXE");
-        if (!string.IsNullOrEmpty(envPath) && File.Exists(envPath))
+        if (!string.IsNullOrEmpty(envPath))
+        {
+            if (!File.Exists(envPath))
+                throw new FileNotFoundException($"PILOTMCP_EXE указывает на несуществующий файл: {envPath}");
             return envPath;
+        }
+
+        // Конфигурацию берём из пути собственной сборки (…/bin/<Config>/net8.0/), а не по времени
+        // записи файла: Debug-прогон обязан запускать Debug-exe, иначе тесты уходят на чужой бинарник.
+        var config = new DirectoryInfo(AppContext.BaseDirectory).Parent?.Name
+            ?? throw new InvalidOperationException(
+                $"Не удалось определить конфигурацию сборки из пути {AppContext.BaseDirectory}");
+
+        var exePath = Path.GetFullPath(Path.Combine(
+            AppContext.BaseDirectory, "..", "..", "..", "..", "bin", config, "net8.0", "PilotMCP.exe"));
+        if (File.Exists(exePath))
+            return exePath;
 
         throw new FileNotFoundException(
-            "PilotMCP.exe not found. Build the project first (dotnet build -c Release) " +
-            "or set PILOTMCP_EXE environment variable.");
+            $"PilotMCP.exe не найден: {exePath}. Соберите проект (dotnet build -c {config}) " +
+            "или задайте переменную окружения PILOTMCP_EXE.");
     }
 
     public async ValueTask DisposeAsync()

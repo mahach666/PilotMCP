@@ -42,9 +42,17 @@ public class ReportToolsTests
         });
 
         result.AssertOk();
+
+        // Отчёт больше 15000 символов инструмент не отдаёт текстом, а сохраняет в файл —
+        // тогда XML проверяем в нём.
+        var savedPath = Regex.Match(result.Message, @"сохранён: (.+\.repx)").Groups[1].Value.Trim();
+        var content = savedPath.Length > 0
+            ? await File.ReadAllTextAsync(savedPath)
+            : result.RawText;
+
         Assert.True(
-            result.RawText.Contains("<?xml") || result.RawText.Contains("XtraReportsLayoutSerializer"),
-            "Expected XML report content");
+            content.Contains("<?xml") || content.Contains("XtraReportsLayoutSerializer"),
+            $"Expected XML report content, got: {result.Message[..Math.Min(300, result.Message.Length)]}");
     }
 
     [Fact]

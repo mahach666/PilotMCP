@@ -232,14 +232,26 @@ public class MetadataAdminTools
     {
         return ToolRunner.RunWriteAsync(_connection, "DeleteType", $"name={name}", async () =>
         {
+            var unlinkedFrom = new List<string>();
             var version = await _connection.UpdateMetadataViaAdminAsync(meta =>
             {
                 var type = ResolveType(meta, name);
                 if (type.Kind != TypeKind.User)
                     throw new InvalidOperationException($"Тип '{name}' — {type.Kind}, удалять можно только пользовательские (User) типы.");
                 type.IsDeleted = true;
+
+                // Обратные ссылки чистим: иначе удалённый тип остаётся в Children родителей,
+                // куда его положили CreateType/AddTypeChildren, и клиенты продолжают его предлагать.
+                foreach (var parent in meta.Types.Where(t => t.Children.Contains(type.Id)))
+                {
+                    parent.Children.Remove(type.Id);
+                    unlinkedFrom.Add(parent.Name);
+                }
             });
-            return ToolResult.Ok($"Тип '{name}' помечен удалённым. Версия метаданных: {version}.");
+            var unlinkInfo = unlinkedFrom.Count > 0
+                ? $" Убран из дочерних у: {string.Join(", ", unlinkedFrom)}."
+                : "";
+            return ToolResult.Ok($"Тип '{name}' помечен удалённым.{unlinkInfo} Версия метаданных: {version}.");
         });
     }
 

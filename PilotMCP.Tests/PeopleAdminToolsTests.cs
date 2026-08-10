@@ -1,4 +1,4 @@
-using System.Text.Json.Nodes;
+﻿using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
 
 namespace PilotMCP.Tests;
@@ -34,11 +34,8 @@ public class PeopleAdminToolsTests
             ["email"] = "mcp-test@example.com",
         }, 60000);
 
-        if (create.Status == "error")
-        {
-            Console.WriteLine($"[PersonLifecycle] SKIP (нет админ-доступа?): {create.Message}");
+        if (AdminGate.ShouldSkip(create, "PersonLifecycle"))
             return;
-        }
 
         try
         {
@@ -69,7 +66,7 @@ public class PeopleAdminToolsTests
                 ["displayName"] = "дубль",
                 ["password"] = "x",
             }, 60000);
-            Assert.Equal("error", duplicate.Status);
+            AdminGate.AssertErrorBecause(duplicate, "уже существует");
         }
         finally
         {
@@ -95,11 +92,8 @@ public class PeopleAdminToolsTests
             ["password"] = firstPassword,
         }, 60000);
 
-        if (create.Status == "error")
-        {
-            Console.WriteLine($"[Password] SKIP (нет админ-доступа?): {create.Message}");
+        if (AdminGate.ShouldSkip(create, "Password"))
             return;
-        }
 
         var personId = ParseId(create.Message, "пользователя");
         int deptId = 0, posId = 0;
@@ -166,11 +160,8 @@ public class PeopleAdminToolsTests
             ["password"] = "Test!Password123",
         }, 60000);
 
-        if (create.Status == "error")
-        {
-            Console.WriteLine($"[DeletePerson] SKIP (нет админ-доступа?): {create.Message}");
+        if (AdminGate.ShouldSkip(create, "DeletePerson"))
             return;
-        }
 
         var delete = await _client.CallToolAsync("DeletePerson", new JsonObject { ["login"] = login }, 60000);
         delete.AssertOk();
@@ -181,7 +172,7 @@ public class PeopleAdminToolsTests
             ["login"] = login,
             ["displayName"] = "x",
         }, 60000);
-        Assert.Equal("error", afterDelete.Status);
+        AdminGate.AssertErrorBecause(afterDelete, "не найден");
     }
 
     [Fact]
@@ -193,7 +184,7 @@ public class PeopleAdminToolsTests
             ["displayName"] = "x",
         }, 60000);
 
-        Assert.Equal("error", result.Status);
+        AdminGate.AssertErrorBecause(result, "не найден");
     }
 
     [Fact]
@@ -207,11 +198,8 @@ public class PeopleAdminToolsTests
             ["password"] = "Test!Password123",
         }, 60000);
 
-        if (create.Status == "error")
-        {
-            Console.WriteLine($"[NoFields] SKIP (нет админ-доступа?): {create.Message}");
+        if (AdminGate.ShouldSkip(create, "NoFields"))
             return;
-        }
 
         try
         {
@@ -219,7 +207,7 @@ public class PeopleAdminToolsTests
             {
                 ["login"] = login,
             }, 60000);
-            Assert.Equal("error", update.Status);
+            AdminGate.AssertErrorBecause(update, "Не указаны поля");
         }
         finally
         {
@@ -241,11 +229,8 @@ public class PeopleAdminToolsTests
             ["parentId"] = 0,
         }, 60000);
 
-        if (createDept.Status == "error")
-        {
-            Console.WriteLine($"[OrgStructure] SKIP (нет админ-доступа?): {createDept.Message}");
+        if (AdminGate.ShouldSkip(createDept, "OrgStructure"))
             return;
-        }
 
         int deptId = ParseId(createDept.Message, "отдела");
         int posId = 0;
@@ -284,7 +269,7 @@ public class PeopleAdminToolsTests
             {
                 ["unitId"] = deptId,
             }, 60000);
-            Assert.Equal("error", deleteBusy.Status);
+            AdminGate.AssertErrorBecause(deleteBusy, "неудалённые дочерние");
 
             // Назначение пользователя на должность
             var createPerson = await _client.CallToolAsync("CreatePerson", new JsonObject
@@ -340,7 +325,7 @@ public class PeopleAdminToolsTests
             deptDeleted = true;
 
             var deleteBusy2 = await _client.CallToolAsync("DeleteOrgUnit", new JsonObject { ["unitId"] = dept2Id }, 60000);
-            Assert.Equal("error", deleteBusy2.Status);
+            AdminGate.AssertErrorBecause(deleteBusy2, "неудалённые дочерние");
 
             // Должность нельзя перенести в корень — ограничение сервера
             var moveToRoot = await _client.CallToolAsync("MoveOrgUnits", new JsonObject
@@ -372,7 +357,7 @@ public class PeopleAdminToolsTests
             ["kind"] = "NoSuchKind",
         }, 60000);
 
-        Assert.Equal("error", result.Status);
+        AdminGate.AssertErrorBecause(result, "NoSuchKind");
     }
 
     [Fact]
@@ -385,11 +370,8 @@ public class PeopleAdminToolsTests
             ["kind"] = "Department",
         }, 60000);
 
-        if (create.Status == "error")
-        {
-            Console.WriteLine($"[NotAPosition] SKIP (нет админ-доступа?): {create.Message}");
+        if (AdminGate.ShouldSkip(create, "NotAPosition"))
             return;
-        }
 
         var deptId = ParseId(create.Message, "отдела");
         try
@@ -400,7 +382,7 @@ public class PeopleAdminToolsTests
                 ["positionId"] = deptId,
                 ["personId"] = 1,
             }, 60000);
-            Assert.Equal("error", assign.Status);
+            AdminGate.AssertErrorBecause(assign, "Position");
         }
         finally
         {
@@ -416,6 +398,62 @@ public class PeopleAdminToolsTests
             ["unitId"] = 999999999,
         }, 60000);
 
+        AdminGate.AssertErrorBecause(result, "не найдена");
+    }
+
+    [Fact]
+    public async Task MoveOrgUnits_InvalidIdInList_MovesNothing()
+    {
+        // Некорректный элемент отклоняет весь список: частичный перенос с рапортом об успехе недопустим.
+        // ID заведомо несуществующие — если валидация регрессирует, тест не тронет реальную оргструктуру.
+        var result = await _client.CallToolAsync("MoveOrgUnits", new JsonObject
+        {
+            ["unitIds"] = "999999998,abc,999999999",
+            ["newParentId"] = 999999997,
+        }, 60000);
+
         Assert.Equal("error", result.Status);
+        Assert.Contains("abc", result.Message);
+    }
+
+    [Fact]
+    public async Task RemovePersonFromPosition_EmptyPosition_ReturnsError()
+    {
+        var posTitle = $"mcp_test_freepos_{Guid.NewGuid():N}";
+        var createDept = await _client.CallToolAsync("CreateOrgUnit", new JsonObject
+        {
+            ["title"] = $"mcp_test_freedept_{Guid.NewGuid():N}",
+            ["kind"] = "Department",
+        }, 60000);
+
+        if (AdminGate.ShouldSkip(createDept, "EmptyPosition"))
+            return;
+
+        var deptId = ParseId(createDept.Message, "отдела");
+        var posId = 0;
+        try
+        {
+            var createPos = await _client.CallToolAsync("CreateOrgUnit", new JsonObject
+            {
+                ["title"] = posTitle,
+                ["kind"] = "Position",
+                ["parentId"] = deptId,
+            }, 60000);
+            createPos.AssertOk();
+            posId = ParseId(createPos.Message, "должности");
+
+            // На только что созданной должности никого нет — освобождать нечего
+            var remove = await _client.CallToolAsync("RemovePersonFromPosition", new JsonObject
+            {
+                ["positionId"] = posId,
+            }, 60000);
+            AdminGate.AssertErrorBecause(remove, "никто не назначен");
+        }
+        finally
+        {
+            if (posId > 0)
+                await _client.CallToolAsync("DeleteOrgUnit", new JsonObject { ["unitId"] = posId }, 60000);
+            await _client.CallToolAsync("DeleteOrgUnit", new JsonObject { ["unitId"] = deptId }, 60000);
+        }
     }
 }

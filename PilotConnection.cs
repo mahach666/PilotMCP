@@ -382,7 +382,10 @@ public class PilotConnection : IDisposable
     /// Выполняет действие через админский API (IServerAdminAsyncApi).
     /// Подключение создаётся лениво: отдельный HttpPilotClient + LoginServerAdministrator.
     /// Креденшалы: PILOT_ADMIN_LOGIN / PILOT_ADMIN_PASSWORD, при их отсутствии — логин/пароль основного подключения.
-    /// При транспортной ошибке админ-клиент пересоздаётся и вызов повторяется один раз.
+    /// При транспортной ошибке админ-клиент сбрасывается (следующий вызов подключится заново),
+    /// но сам вызов НЕ повторяется: через этот метод идут неидемпотентные записи
+    /// (ChangePeople, UpdateMetadata, MoveOrganisationUnits), и при обрыве в середине вызова
+    /// неизвестно, применил ли сервер изменение — молчаливый повтор применил бы его дважды.
     /// </summary>
     public async Task<T> WithAdminApiAsync<T>(Func<IServerAdminAsyncApi, Task<T>> action)
     {
@@ -393,10 +396,9 @@ public class PilotConnection : IDisposable
         }
         catch (Exception ex) when (ReconnectingProxy<IServerAdminAsyncApi>.IsRecoverableError(ex))
         {
-            Console.Error.WriteLine($"[PilotMCP] AdminApi: {ex.GetType().Name}: {ex.Message} — пересоздание админ-подключения...");
+            Console.Error.WriteLine($"[PilotMCP] AdminApi: {ex.GetType().Name}: {ex.Message} — админ-подключение сброшено.");
             ResetAdminClient();
-            api = GetOrCreateAdminApi();
-            return await action(api);
+            throw;
         }
     }
 

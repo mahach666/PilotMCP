@@ -1,4 +1,4 @@
-using System.Text.Json.Nodes;
+﻿using System.Text.Json.Nodes;
 
 namespace PilotMCP.Tests;
 
@@ -27,11 +27,8 @@ public class MetadataAdminToolsTests
             ["isPaused"] = true,
         }, 60000);
 
-        if (create.Status == "error")
-        {
-            Console.WriteLine($"[AutomationLifecycle] SKIP (нет админ-доступа?): {create.Message}");
+        if (AdminGate.ShouldSkip(create, "AutomationLifecycle"))
             return;
-        }
 
         try
         {
@@ -74,11 +71,8 @@ public class MetadataAdminToolsTests
             ["title"] = "MCP тестовый тип",
         }, 60000);
 
-        if (create.Status == "error")
-        {
-            Console.WriteLine($"[TypeLifecycle] SKIP (нет админ-доступа?): {create.Message}");
+        if (AdminGate.ShouldSkip(create, "TypeLifecycle"))
             return;
-        }
 
         try
         {
@@ -148,13 +142,11 @@ public class MetadataAdminToolsTests
             ["title"] = "MCP тестовый родитель",
         }, 60000);
 
-        if (createParent.Status == "error")
-        {
-            Console.WriteLine($"[TypeChildren] SKIP (нет админ-доступа?): {createParent.Message}");
+        if (AdminGate.ShouldSkip(createParent, "TypeChildren"))
             return;
-        }
 
         var child2Name = $"mcp_test_child2_{Guid.NewGuid():N}";
+        var childDeleted = false;
         try
         {
             var createChild = await _client.CallToolAsync("CreateType", new JsonObject
@@ -178,7 +170,7 @@ public class MetadataAdminToolsTests
                 ["parentTypeName"] = parentName,
                 ["childTypeNames"] = childName,
             }, 60000);
-            Assert.Equal("error", addAgain.Status);
+            AdminGate.AssertErrorBecause(addAgain, "уже являются дочерними");
 
             // Создание типа сразу с родителем (parentTypeNames)
             var createChild2 = await _client.CallToolAsync("CreateType", new JsonObject
@@ -188,11 +180,22 @@ public class MetadataAdminToolsTests
                 ["parentTypeNames"] = parentName,
             }, 60000);
             createChild2.AssertOk();
+
+            // Удаление типа снимает обратную ссылку из Children родителя
+            var deleteChild = await _client.CallToolAsync("DeleteType", new JsonObject
+            {
+                ["name"] = childName,
+            }, 60000);
+            deleteChild.AssertOk();
+            childDeleted = true;
+            Assert.Contains("Убран из дочерних у:", deleteChild.Message);
+            Assert.Contains(parentName, deleteChild.Message);
         }
         finally
         {
             await _client.CallToolAsync("DeleteType", new JsonObject { ["name"] = child2Name }, 60000);
-            await _client.CallToolAsync("DeleteType", new JsonObject { ["name"] = childName }, 60000);
+            if (!childDeleted)
+                await _client.CallToolAsync("DeleteType", new JsonObject { ["name"] = childName }, 60000);
             await _client.CallToolAsync("DeleteType", new JsonObject { ["name"] = parentName }, 60000);
         }
     }
@@ -210,9 +213,7 @@ public class MetadataAdminToolsTests
             ["attrType"] = "NoSuchType",
         }, 60000);
 
-        Assert.Equal("error", result.Status);
-        if (!result.Message.Contains("NoSuchType"))
-            Console.WriteLine($"[UnknownAttrType] сообщение без деталей (нет админ-доступа?): {result.Message}");
+        AdminGate.AssertErrorBecause(result, "NoSuchType");
     }
 
     [Fact]
@@ -227,11 +228,8 @@ public class MetadataAdminToolsTests
             ["color"] = "Color1",
         }, 60000);
 
-        if (create.Status == "error")
-        {
-            Console.WriteLine($"[UserState] SKIP (нет админ-доступа?): {create.Message}");
+        if (AdminGate.ShouldSkip(create, "UserState"))
             return;
-        }
 
         try
         {
@@ -272,11 +270,8 @@ public class MetadataAdminToolsTests
             ["title"] = "MCP исходное",
         }, 60000);
 
-        if (createS1.Status == "error")
-        {
-            Console.WriteLine($"[StateMachine] SKIP (нет админ-доступа?): {createS1.Message}");
+        if (AdminGate.ShouldSkip(createS1, "StateMachine"))
             return;
-        }
 
         var renamedTitle = $"{machineTitle}_renamed";
         var typeName = $"mcp_test_smtype_{Guid.NewGuid():N}";
@@ -324,7 +319,7 @@ public class MetadataAdminToolsTests
             {
                 ["name"] = s1,
             }, 60000);
-            Assert.Equal("error", deleteUsedState.Status);
+            AdminGate.AssertErrorBecause(deleteUsedState, "используется в машинах состояний");
 
             // Привязка машины к типу (UpdateType stateMachineId)
             var createType = await _client.CallToolAsync("CreateType", new JsonObject
@@ -384,7 +379,7 @@ public class MetadataAdminToolsTests
             ["isPaused"] = "true",
         }, 60000);
 
-        Assert.Equal("error", result.Status);
+        AdminGate.AssertErrorBecause(result, "не найдена");
     }
 
     [Fact]
@@ -414,11 +409,9 @@ public class MetadataAdminToolsTests
             ["cSharpCode"] = code,
         }, 60000);
 
-        if (result.Status == "error" && !result.Message.Contains("проверк"))
-        {
-            Console.WriteLine($"[ValidateValid] SKIP (нет админ-доступа?): {result.Message}");
+        if (AdminGate.ShouldSkip(result, "ValidateValid"))
             return;
-        }
+
         result.AssertOk();
         Assert.Contains("валиден", result.Message);
     }
@@ -431,8 +424,7 @@ public class MetadataAdminToolsTests
             ["cSharpCode"] = "this is not valid c# code {{{",
         }, 60000);
 
-        // Ошибка либо от компиляции (ожидаемо), либо от отсутствия админ-доступа (скип)
-        Console.WriteLine($"[ValidateScript] status={result.Status}, msg={result.Message}");
-        Assert.Equal("error", result.Status);
+        // С админ-доступом ошибка обязана быть от компиляции, а не от нехватки прав
+        AdminGate.AssertErrorBecause(result, "не прошёл проверку");
     }
 }

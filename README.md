@@ -339,6 +339,37 @@ ExportCsv("tmp/filter_x.jsonl", "C:/result/docs.csv", "name,typeName,created")
 Сервер тестировался в Pilot 26.1.
 Для тестирования использовалась локальная LLM Qwen3.5 27B (Контекст 200к токенов)
 
+### Сборка релиза
+
+```bash
+dotnet build -c Release
+```
+
+Релизная сборка дополнительно кладёт в `artifacts/` два готовых архива под `win-x64`:
+
+| Архив                                        | Размер | Требования на машине пользователя |
+| -------------------------------------------- | ------ | --------------------------------- |
+| `PilotMCP-v<версия>-win-x64-selfcontained.zip` | ~75 МБ | ничего, .NET внутри               |
+| `PilotMCP-v<версия>-win-x64.zip`               | ~43 МБ | установленный .NET 8 Runtime      |
+
+В каждом архиве — `PilotMCP.exe` со всеми зависимостями, папка `ReportSamples`, `README.md` и `LICENSE.txt`. Отладочные символы (`.pdb`) исключены.
+
+Версия берётся из `<Version>` в `PilotMCP.csproj`, платформа — из свойства `ReleaseRid` там же.
+
+Собрать только архивы, без прочих проектов решения:
+
+```bash
+dotnet build PilotMCP.csproj -c Release
+```
+
+Отключить упаковку (например, в CI, где нужна только сборка):
+
+```bash
+dotnet build -c Release -p:SkipReleasePackaging=true
+```
+
+> Если `dotnet build -c Release` падает с `PilotMCP.exe ... используется другим процессом` — значит запущены MCP-клиенты, работающие с `bin/Release/net8.0/PilotMCP.exe`. Закройте их перед сборкой.
+
 ### Лицензия
 
 Проект распространяется по лицензии Apache 2.0. Подробности см. в `LICENSE.txt`.

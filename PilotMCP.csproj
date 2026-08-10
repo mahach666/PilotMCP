@@ -7,7 +7,7 @@
     <AssemblyName>PilotMCP</AssemblyName>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
-    <Version>0.0.0.2</Version>
+    <Version>0.0.0.3</Version>
   </PropertyGroup>
 
   <ItemGroup>
@@ -29,5 +29,55 @@
     <PackageReference Include="SkiaSharp" Version="3.119.2" />
     <PackageReference Include="UglyToad.PdfPig" Version="1.7.0-custom-5" />
   </ItemGroup>
+
+  <!--
+    Релизные архивы для GitHub Releases: `dotnet build -c Release` кладёт готовые ZIP в artifacts/.
+    Собираются два — с .NET внутри и без него.
+
+    Почему publish под конкретный RID, а не ZIP из bin/Release: без RuntimeIdentifier в вывод
+    попадают native-библиотеки MuPDF/Skia под все платформы (linux, osx, win-arm, ...) — ~840 МБ.
+  -->
+  <PropertyGroup>
+    <ReleaseRid>win-x64</ReleaseRid>
+    <ReleaseArtifactsDir>$(MSBuildProjectDirectory)\artifacts</ReleaseArtifactsDir>
+    <ReleaseStageRoot>$(MSBuildProjectDirectory)\obj\release-stage</ReleaseStageRoot>
+  </PropertyGroup>
+
+  <Target Name="PackReleaseArchives" AfterTargets="Build"
+          Condition="'$(Configuration)' == 'Release' AND '$(SkipReleasePackaging)' != 'true'">
+
+    <PropertyGroup>
+      <FrameworkStageDir>$(ReleaseStageRoot)\framework-dependent</FrameworkStageDir>
+      <SelfContainedStageDir>$(ReleaseStageRoot)\self-contained</SelfContainedStageDir>
+      <FrameworkZip>$(ReleaseArtifactsDir)\PilotMCP-v$(Version)-$(ReleaseRid).zip</FrameworkZip>
+      <SelfContainedZip>$(ReleaseArtifactsDir)\PilotMCP-v$(Version)-$(ReleaseRid)-selfcontained.zip</SelfContainedZip>
+    </PropertyGroup>
+
+    <RemoveDir Directories="$(ReleaseStageRoot)" />
+    <MakeDir Directories="$(ReleaseArtifactsDir)" />
+
+    <!-- SkipReleasePackaging гасит рекурсию: publish снова прогоняет Build этого же проекта -->
+    <Exec Command="dotnet publish &quot;$(MSBuildProjectFullPath)&quot; -c Release -r $(ReleaseRid) --self-contained false -o &quot;$(FrameworkStageDir)&quot; -p:SkipReleasePackaging=true --nologo -v quiet" />
+    <Exec Command="dotnet publish &quot;$(MSBuildProjectFullPath)&quot; -c Release -r $(ReleaseRid) --self-contained true -o &quot;$(SelfContainedStageDir)&quot; -p:SkipReleasePackaging=true --nologo -v quiet" />
+
+    <ItemGroup>
+      <!-- Отладочные символы в релизе не нужны: один только libSkiaSharp.pdb — 80 МБ -->
+      <ReleaseStagePdb Include="$(ReleaseStageRoot)\**\*.pdb" />
+      <ReleaseDoc Include="$(MSBuildProjectDirectory)\README.md;$(MSBuildProjectDirectory)\LICENSE.txt" />
+    </ItemGroup>
+
+    <Delete Files="@(ReleaseStagePdb)" />
+    <Copy SourceFiles="@(ReleaseDoc)" DestinationFolder="$(FrameworkStageDir)" />
+    <Copy SourceFiles="@(ReleaseDoc)" DestinationFolder="$(SelfContainedStageDir)" />
+
+    <ZipDirectory SourceDirectory="$(FrameworkStageDir)" DestinationFile="$(FrameworkZip)" Overwrite="true" />
+    <ZipDirectory SourceDirectory="$(SelfContainedStageDir)" DestinationFile="$(SelfContainedZip)" Overwrite="true" />
+
+    <RemoveDir Directories="$(ReleaseStageRoot)" />
+
+    <Message Importance="high" Text="Релизные архивы ($(ReleaseRid), версия $(Version)):" />
+    <Message Importance="high" Text="  $(FrameworkZip) — нужен установленный .NET 8 Runtime" />
+    <Message Importance="high" Text="  $(SelfContainedZip) — .NET не нужен" />
+  </Target>
 
 </Project>

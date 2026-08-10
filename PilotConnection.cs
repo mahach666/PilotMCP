@@ -34,6 +34,12 @@ public class PilotConnection : IDisposable
     private IFileArchiveApi? _proxyFileApi;
     private IMessagesApi? _proxyMessagesApi;
 
+    // Админ-подключение (LoginServerAdministrator) — создаётся лениво при первом обращении
+    private HttpPilotClient? _adminClient;
+    private IServerAdminAsyncApi? _adminApi;
+    private volatile bool _adminConnectionLost;
+    private readonly object _adminLock = new();
+
     // Сохранённые креденшалы для автопереподключения
     private string? _savedServerUrl;
     private string? _savedLogin;
@@ -373,6 +379,105 @@ public class PilotConnection : IDisposable
     }
 
     /// <summary>
+    /// Выполняет действие через админский API (IServerAdminAsyncApi).
+    /// Подключение создаётся лениво: отдельный HttpPilotClient + LoginServerAdministrator.
+    /// Креденшалы: PILOT_ADMIN_LOGIN / PILOT_ADMIN_PASSWORD, при их отсутствии — логин/пароль основного подключения.
+    /// При транспортной ошибке админ-клиент пересоздаётся и вызов повторяется один раз.
+    /// </summary>
+    public async Task<T> WithAdminApiAsync<T>(Func<IServerAdminAsyncApi, Task<T>> action)
+    {
+        var api = GetOrCreateAdminApi();
+        try
+        {
+            return await action(api);
+        }
+        catch (Exception ex) when (ReconnectingProxy<IServerAdminAsyncApi>.IsRecoverableError(ex))
+        {
+            Console.Error.WriteLine($"[PilotMCP] AdminApi: {ex.GetType().Name}: {ex.Message} — пересоздание админ-подключения...");
+            ResetAdminClient();
+            api = GetOrCreateAdminApi();
+            return await action(api);
+        }
+    }
+
+    /// <summary>
+    /// Атомарно обновляет метаданные базы: читает свежую копию через админский API,
+    /// применяет mutate и записывает обратно. Возвращает новую версию метаданных.
+    /// После успешной записи локальный кеш метаданных обновляется.
+    /// </summary>
+    public async Task<long> UpdateMetadataViaAdminAsync(Action<DMetadata> mutate)
+    {
+        EnsureConnected();
+        return await WithAdminApiAsync(async admin =>
+        {
+            var meta = await admin.GetMetadataAsync(DatabaseName, 0);
+            mutate(meta);
+            var newVersion = await admin.UpdateMetadataAsync(DatabaseName, meta);
+            meta.Version = newVersion;
+            _metadata = meta;
+            return newVersion;
+        });
+    }
+
+    private IServerAdminAsyncApi GetOrCreateAdminApi()
+    {
+        lock (_adminLock)
+        {
+            if (_adminApi != null && !_adminConnectionLost)
+                return _adminApi;
+
+            DisposeAdminClientLocked();
+
+            var adminLogin = Environment.GetEnvironmentVariable("PILOT_ADMIN_LOGIN");
+            var adminPassword = Environment.GetEnvironmentVariable("PILOT_ADMIN_PASSWORD");
+            if (string.IsNullOrEmpty(adminLogin))
+            {
+                adminLogin = _savedLogin;
+                adminPassword = _savedPassword;
+            }
+
+            if (string.IsNullOrEmpty(_savedServerUrl) || string.IsNullOrEmpty(adminLogin))
+                throw new InvalidOperationException(
+                    "Нет креденшалов для админ-подключения. Задайте PILOT_ADMIN_LOGIN и PILOT_ADMIN_PASSWORD " +
+                    "(или подключитесь к серверу с учёткой администратора сервера).");
+
+            Console.Error.WriteLine($"[PilotMCP] Админ-подключение к {_savedServerUrl}, логин: {adminLogin}");
+
+            var credentials = ConnectionCredentials.GetConnectionCredentials(
+                _savedServerUrl, adminLogin, (adminPassword ?? "").ConvertToSecureString());
+
+            _adminConnectionLost = false;
+            _adminClient = new HttpPilotClient(credentials.GetConnectionString(), credentials.GetConnectionProxy());
+            _adminClient.SetConnectionLostListener(new AdminConnectionLostHandler(this));
+            _adminClient.Connect(false);
+
+            var auth = _adminClient.GetAuthenticationApi();
+            auth.LoginServerAdministrator(credentials.Username, credentials.ProtectedPassword, false);
+            Console.Error.WriteLine("[PilotMCP] Админ-авторизация успешна");
+
+            _adminApi = _adminClient.GetServerAdminAsyncApi(new AdminCallback());
+            return _adminApi;
+        }
+    }
+
+    private void ResetAdminClient()
+    {
+        lock (_adminLock)
+        {
+            DisposeAdminClientLocked();
+        }
+    }
+
+    private void DisposeAdminClientLocked()
+    {
+        try { _adminClient?.Disconnect(); } catch { }
+        try { (_adminClient as IDisposable)?.Dispose(); } catch { }
+        _adminClient = null;
+        _adminApi = null;
+        _adminConnectionLost = false;
+    }
+
+    /// <summary>
     /// Выполняет поиск и ждёт результат синхронно (с таймаутом).
     /// </summary>
     public async Task<DSearchResult?> SearchAsync(DSearchDefinition searchDef, int timeoutMs = 30000)
@@ -386,6 +491,8 @@ public class PilotConnection : IDisposable
 
     public void Disconnect()
     {
+        ResetAdminClient();
+
         try { _client?.Disconnect(); } catch { }
         try { (_client as IDisposable)?.Dispose(); } catch { }
 
@@ -504,6 +611,31 @@ public class PilotConnection : IDisposable
             Console.Error.WriteLine($"[PilotMCP] CONNECTION LOST: {ex.GetType().Name}: {ex.Message}");
             _owner._connectionLost = true;
         }
+    }
+
+    private class AdminConnectionLostHandler : IConnectionLostListener
+    {
+        private readonly PilotConnection _owner;
+        public AdminConnectionLostHandler(PilotConnection owner) => _owner = owner;
+
+        public void ConnectionLost(Exception ex)
+        {
+            Console.Error.WriteLine($"[PilotMCP] ADMIN CONNECTION LOST: {ex.GetType().Name}: {ex.Message}");
+            _owner._adminConnectionLost = true;
+        }
+    }
+
+    private class AdminCallback : IServerAdminCallback
+    {
+        public void NotifyDatabaseChanged(DatabaseChangeset changeset) { }
+        public void NotifyPersonChanged(string database, PersonChangeset changeset) { }
+        public void NotifyOrganisationUnitChanged(string database, OrganisationUnitChangeset changeset) { }
+        public void NotifyDMetadataChanged(string database, DMetadataChangeset changeset) { }
+        public void NotifyConnectionCountFromServer(int current, int max) { }
+        public void NotifyReservationsChanged() { }
+        public void NotifyIndexingStateChanged(string database, ushort state) { }
+        public void NotifySessionsFromServer(int current, int max, int reserved, Guid licenseId) { }
+        public void NotifyLicenseChanged() { }
     }
 
     private class MessageCallback : IMessageCallback

@@ -15,8 +15,15 @@ public class McpTestClient : IAsyncDisposable
     private StreamWriter? _stdin;
     private StreamReader? _stdout;
     private readonly SemaphoreSlim _lock = new(1, 1);
+    private readonly Queue<string> _stderrLines = new();
     private int _requestId;
     private bool _initialized;
+
+    /// <summary>Последние строки stderr процесса PilotMCP — для диагностики упавших тестов.</summary>
+    public string[] GetStderrTail()
+    {
+        lock (_stderrLines) return _stderrLines.ToArray();
+    }
 
     private McpTestClient() { }
 
@@ -37,7 +44,7 @@ public class McpTestClient : IAsyncDisposable
             StandardInputEncoding = Encoding.UTF8,
         };
 
-        var envVars = new[] { "PILOT_SERVER_URL", "PILOT_LOGIN", "PILOT_PASSWORD", "PILOT_DATABASE", "PILOT_LICENSE_TYPE", "PILOT_READONLY" };
+        var envVars = new[] { "PILOT_SERVER_URL", "PILOT_LOGIN", "PILOT_PASSWORD", "PILOT_DATABASE", "PILOT_LICENSE_TYPE", "PILOT_READONLY", "PILOT_ADMIN_LOGIN", "PILOT_ADMIN_PASSWORD" };
         foreach (var key in envVars)
         {
             var val = Environment.GetEnvironmentVariable(key);
@@ -50,6 +57,19 @@ public class McpTestClient : IAsyncDisposable
         client._stdin = client._process.StandardInput;
         client._stdin.AutoFlush = true;
         client._stdout = new StreamReader(client._process.StandardOutput.BaseStream, Encoding.UTF8, false, 256 * 1024);
+
+        // stderr обязательно вычитывать: иначе при заполнении буфера пайпа (~4КБ)
+        // процесс PilotMCP блокируется на Console.Error.WriteLine и все вызовы виснут.
+        client._process.ErrorDataReceived += (_, e) =>
+        {
+            if (e.Data == null) return;
+            lock (client._stderrLines)
+            {
+                client._stderrLines.Enqueue(e.Data);
+                while (client._stderrLines.Count > 200) client._stderrLines.Dequeue();
+            }
+        };
+        client._process.BeginErrorReadLine();
 
         // Initialize MCP
         var initResponse = await client.SendRequestInternalAsync("initialize", new JsonObject
@@ -156,11 +176,14 @@ public class McpTestClient : IAsyncDisposable
             Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "bin", "Debug", "net8.0", "PilotMCP.exe"),
         };
 
-        foreach (var c in candidates)
-        {
-            var full = Path.GetFullPath(c);
-            if (File.Exists(full)) return full;
-        }
+        // Из существующих сборок берём самую свежую — стабильный порядок (Release-first)
+        // приводил к прогону тестов на устаревшем exe.
+        var newest = candidates
+            .Select(Path.GetFullPath)
+            .Where(File.Exists)
+            .OrderByDescending(File.GetLastWriteTimeUtc)
+            .FirstOrDefault();
+        if (newest != null) return newest;
 
         var envPath = Environment.GetEnvironmentVariable("PILOTMCP_EXE");
         if (!string.IsNullOrEmpty(envPath) && File.Exists(envPath))

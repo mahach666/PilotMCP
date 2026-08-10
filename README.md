@@ -21,6 +21,8 @@ MCP-сервер для работы с Pilot через Server API. Позво�
 | `PILOT_DATABASE`     | Имя базы данных (если пусто — берётся из URL)                              | нет          |
 | `PILOT_LICENSE_TYPE` | Код лицензии: по умолчанию `100`                                           | нет          |
 | `PILOT_READONLY`     | Режим только чтения: `true` или `1`. Блокирует все операции записи.        | нет          |
+| `PILOT_ADMIN_LOGIN`  | Логин администратора сервера — для инструментов редактирования метаданных (автоматизации, типы, состояния). Если не задан, используется `PILOT_LOGIN`. | нет |
+| `PILOT_ADMIN_PASSWORD` | Пароль администратора сервера                                            | нет          |
 
 
 
@@ -48,7 +50,7 @@ MCP-сервер для работы с Pilot через Server API. Позво�
 
 При `PILOT_READONLY=true` сервер сообщает модели об ограничениях через системный промпт при инициализации. Модель не будет пытаться выполнять операции записи и сразу сообщит пользователю об ограничении.
 
-Заблокированы: `CreateObject`, `SetAttribute`, `DeleteObject`, `RestoreObject`, `MoveObject`, `LockObject`, `UnlockObject`, `FreezeObject`, `UnfreezeObject`, `MakeSecret`, `MakePublic`, `DeleteFile`, `SetUserState`, `Subscribe`, `Unsubscribe`, `AnnotateText`, `CreateAnnotation`, `SendMessage`, `EditMessage`, `ReplyMessage`, `CreateChat`, `UploadFile`, `InvokeCommand`, `CreateLink`, `DeleteRelation`, `AddAccessRecord`, `RemoveAllAccessRecords`, `UpdatePerson`, `ChangeSettings`, `CreateReport`, `UpdateReport`, `CreateTask`, `CreateWorkflow`, `AddSignatureRequest`.
+Заблокированы: `CreateObject`, `SetAttribute`, `DeleteObject`, `RestoreObject`, `MoveObject`, `LockObject`, `UnlockObject`, `FreezeObject`, `UnfreezeObject`, `MakeSecret`, `MakePublic`, `DeleteFile`, `SetUserState`, `Subscribe`, `Unsubscribe`, `AnnotateText`, `CreateAnnotation`, `SendMessage`, `EditMessage`, `ReplyMessage`, `CreateChat`, `UploadFile`, `InvokeCommand`, `CreateLink`, `DeleteRelation`, `AddAccessRecord`, `RemoveAllAccessRecords`, `UpdatePerson`, `ChangeSettings`, `CreateReport`, `UpdateReport`, `CreateTask`, `CreateWorkflow`, `AddSignatureRequest`, `CreateAutomationConfig`, `UpdateAutomationConfig`, `DeleteAutomationConfig`, `CreateType`, `UpdateType`, `DeleteType`, `AddTypeChildren`, `AddTypeAttribute`, `UpdateTypeAttribute`, `DeleteTypeAttribute`, `CreateUserState`, `UpdateUserState`, `DeleteUserState`, `CreateStateMachine`, `UpdateStateMachine`, `DeleteStateMachine`.
 
 ---
 
@@ -253,6 +255,34 @@ ExportCsv("tmp/filter_x.jsonl", "C:/result/docs.csv", "name,typeName,created")
 | Инструмент              | Описание                                                           |
 | ----------------------- | -------------------------------------------------------------------|
 | `GetAutomationConfigs`  | Все автоматизации, включая их основную часть и C# код → JSONL-файл |
+| `CreateAutomationConfig`  | Создать автоматизацию (имя, триггеры, C# код) *                  |
+| `UpdateAutomationConfig`  | Изменить автоматизацию по имени (код, триггеры, пауза) *         |
+| `DeleteAutomationConfig`  | Удалить автоматизацию по имени *                                 |
+| `ValidateAutomationScript`| Проверить C# код автоматизации на сервере без сохранения *       |
+
+### Редактирование метаданных (типы, атрибуты, состояния)
+
+Инструменты, помеченные `*`, работают через админский API сервера (как Pilot-myAdmin):
+требуется учётная запись **администратора сервера** (`PILOT_ADMIN_LOGIN` / `PILOT_ADMIN_PASSWORD`;
+если не заданы — используются основные логин/пароль). Каждая операция читает свежие метаданные,
+вносит точечное изменение и записывает их обратно целиком, поэтому параллельные правки в myAdmin
+не затираются. Все операции блокируются в режиме `PILOT_READONLY`.
+
+| Инструмент            | Описание                                                                  |
+| --------------------- | ------------------------------------------------------------------------- |
+| `CreateType`          | Создать тип объекта (вид, файлы, монтируемость, родительские типы) *      |
+| `UpdateType`          | Изменить тип (название, файлы, сортировка, машина состояний) *            |
+| `DeleteType`          | Пометить пользовательский тип удалённым (IsDeleted) *                     |
+| `AddTypeChildren`     | Добавить дочерние типы (какие типы можно создавать внутри) *              |
+| `AddTypeAttribute`    | Добавить атрибут к типу (Integer, String, DateTime, OrgUnit, ...) *       |
+| `UpdateTypeAttribute` | Изменить атрибут типа *                                                   |
+| `DeleteTypeAttribute` | Удалить атрибут типа *                                                    |
+| `CreateUserState`     | Создать пользовательское состояние (цвет, признак завершения) *           |
+| `UpdateUserState`     | Изменить пользовательское состояние *                                     |
+| `DeleteUserState`     | Пометить состояние удалённым (если не используется в машинах) *           |
+| `CreateStateMachine`  | Создать машину состояний с переходами (JSON) *                            |
+| `UpdateStateMachine`  | Изменить машину состояний (название, полная замена переходов) *           |
+| `DeleteStateMachine`  | Удалить машину состояний (если не привязана к типам) *                    |
 
 
 ### Задачи

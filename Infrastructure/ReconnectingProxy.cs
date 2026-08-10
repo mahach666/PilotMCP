@@ -133,6 +133,12 @@ public class ReconnectingProxy<T> : DispatchProxy where T : class
         }
     }
 
+    /// <summary>
+    /// Определяет, является ли ошибка транспортной (соединение потеряно/закрыто) —
+    /// используется также PilotConnection для админ-подключения.
+    /// </summary>
+    internal static bool IsRecoverableError(Exception? ex) => IsRecoverable(ex);
+
     private static bool IsRecoverable(Exception? ex)
     {
         if (ex == null) return false;

@@ -154,6 +154,7 @@ public class MetadataAdminToolsTests
             return;
         }
 
+        var child2Name = $"mcp_test_child2_{Guid.NewGuid():N}";
         try
         {
             var createChild = await _client.CallToolAsync("CreateType", new JsonObject
@@ -178,12 +179,40 @@ public class MetadataAdminToolsTests
                 ["childTypeNames"] = childName,
             }, 60000);
             Assert.Equal("error", addAgain.Status);
+
+            // Создание типа сразу с родителем (parentTypeNames)
+            var createChild2 = await _client.CallToolAsync("CreateType", new JsonObject
+            {
+                ["name"] = child2Name,
+                ["title"] = "MCP тестовый ребёнок 2",
+                ["parentTypeNames"] = parentName,
+            }, 60000);
+            createChild2.AssertOk();
         }
         finally
         {
+            await _client.CallToolAsync("DeleteType", new JsonObject { ["name"] = child2Name }, 60000);
             await _client.CallToolAsync("DeleteType", new JsonObject { ["name"] = childName }, 60000);
             await _client.CallToolAsync("DeleteType", new JsonObject { ["name"] = parentName }, 60000);
         }
+    }
+
+    [Fact]
+    public async Task AddTypeAttribute_UnknownAttrType_ReturnsError()
+    {
+        // Ошибка парсинга типа атрибута возникает до записи метаданных —
+        // но требует существующего типа, берём системный Root_object_type
+        var result = await _client.CallToolAsync("AddTypeAttribute", new JsonObject
+        {
+            ["typeName"] = "Root_object_type",
+            ["name"] = "mcp_never_created",
+            ["title"] = "x",
+            ["attrType"] = "NoSuchType",
+        }, 60000);
+
+        Assert.Equal("error", result.Status);
+        if (!result.Message.Contains("NoSuchType"))
+            Console.WriteLine($"[UnknownAttrType] сообщение без деталей (нет админ-доступа?): {result.Message}");
     }
 
     [Fact]
@@ -249,7 +278,10 @@ public class MetadataAdminToolsTests
             return;
         }
 
+        var renamedTitle = $"{machineTitle}_renamed";
+        var typeName = $"mcp_test_smtype_{Guid.NewGuid():N}";
         var machineCreated = false;
+        var typeCreated = false;
         try
         {
             var createS2 = await _client.CallToolAsync("CreateUserState", new JsonObject
@@ -267,17 +299,25 @@ public class MetadataAdminToolsTests
             createMachine.AssertOk();
             machineCreated = true;
 
+            // ID машины — из сообщения "…создана (ID: <guid>)"
+            var idMatch = System.Text.RegularExpressions.Regex.Match(
+                createMachine.Message, @"ID: ([0-9a-fA-F-]{36})");
+            Assert.True(idMatch.Success, $"Не удалось извлечь ID машины из: {createMachine.Message}");
+            var machineId = idMatch.Groups[1].Value;
+
             var updateMachine = await _client.CallToolAsync("UpdateStateMachine", new JsonObject
             {
                 ["machine"] = machineTitle,
+                ["title"] = renamedTitle,
                 ["transitionsJson"] = $"{{\"{s1}\": [{{\"stateTo\": \"{s2}\", \"displayName\": \"Перевести (обновлено)\"}}], \"{s2}\": [{{\"stateTo\": \"{s1}\", \"displayName\": \"Вернуть\"}}]}}",
             }, 60000);
             updateMachine.AssertOk();
+            machineTitle = renamedTitle;
 
-            // Машина видна через обычный инструмент чтения
+            // Машина видна под новым названием через обычный инструмент чтения
             var machines = await _client.CallToolAsync("GetStateMachines", null, 60000);
             machines.AssertOk();
-            Assert.Contains(machineTitle, machines.Message);
+            Assert.Contains(renamedTitle, machines.Message);
 
             // Состояние, используемое в машине, удалить нельзя
             var deleteUsedState = await _client.CallToolAsync("DeleteUserState", new JsonObject
@@ -285,9 +325,43 @@ public class MetadataAdminToolsTests
                 ["name"] = s1,
             }, 60000);
             Assert.Equal("error", deleteUsedState.Status);
+
+            // Привязка машины к типу (UpdateType stateMachineId)
+            var createType = await _client.CallToolAsync("CreateType", new JsonObject
+            {
+                ["name"] = typeName,
+                ["title"] = "MCP тип с машиной состояний",
+            }, 60000);
+            createType.AssertOk();
+            typeCreated = true;
+
+            var attach = await _client.CallToolAsync("UpdateType", new JsonObject
+            {
+                ["name"] = typeName,
+                ["stateMachineId"] = machineId,
+            }, 60000);
+            attach.AssertOk();
+
+            // Машину, привязанную к типу, удалить нельзя
+            var deleteAttached = await _client.CallToolAsync("DeleteStateMachine", new JsonObject
+            {
+                ["machine"] = machineTitle,
+            }, 60000);
+            Assert.Equal("error", deleteAttached.Status);
+            Assert.Contains(typeName, deleteAttached.Message);
+
+            // Отвязка (stateMachineId=none)
+            var detach = await _client.CallToolAsync("UpdateType", new JsonObject
+            {
+                ["name"] = typeName,
+                ["stateMachineId"] = "none",
+            }, 60000);
+            detach.AssertOk();
         }
         finally
         {
+            if (typeCreated)
+                await _client.CallToolAsync("DeleteType", new JsonObject { ["name"] = typeName }, 60000);
             if (machineCreated)
             {
                 var deleteMachine = await _client.CallToolAsync("DeleteStateMachine", new JsonObject
@@ -311,6 +385,42 @@ public class MetadataAdminToolsTests
         }, 60000);
 
         Assert.Equal("error", result.Status);
+    }
+
+    [Fact]
+    public async Task ValidateAutomationScript_ExistingAutomationCode_IsValid()
+    {
+        // Код реальной автоматизации из базы обязан проходить серверную валидацию
+        var list = await _client.CallToolAsync("GetAutomationConfigs", null, 60000);
+        list.AssertOk();
+        if (list.Count == 0 || list.ResultFile == null)
+        {
+            Console.WriteLine("[ValidateValid] SKIP: в базе нет автоматизаций.");
+            return;
+        }
+
+        var code = (await File.ReadAllLinesAsync(list.ResultFile))
+            .Where(l => !string.IsNullOrWhiteSpace(l))
+            .Select(l => System.Text.Json.Nodes.JsonNode.Parse(l)?["cSharpCode"]?.GetValue<string>())
+            .FirstOrDefault(c => !string.IsNullOrWhiteSpace(c));
+        if (code == null)
+        {
+            Console.WriteLine("[ValidateValid] SKIP: в базе нет автоматизаций с C#-кодом.");
+            return;
+        }
+
+        var result = await _client.CallToolAsync("ValidateAutomationScript", new JsonObject
+        {
+            ["cSharpCode"] = code,
+        }, 60000);
+
+        if (result.Status == "error" && !result.Message.Contains("проверк"))
+        {
+            Console.WriteLine($"[ValidateValid] SKIP (нет админ-доступа?): {result.Message}");
+            return;
+        }
+        result.AssertOk();
+        Assert.Contains("валиден", result.Message);
     }
 
     [Fact]

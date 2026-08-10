@@ -50,7 +50,7 @@ MCP-сервер для работы с Pilot через Server API. Позво�
 
 При `PILOT_READONLY=true` сервер сообщает модели об ограничениях через системный промпт при инициализации. Модель не будет пытаться выполнять операции записи и сразу сообщит пользователю об ограничении.
 
-Заблокированы: `CreateObject`, `SetAttribute`, `DeleteObject`, `RestoreObject`, `MoveObject`, `LockObject`, `UnlockObject`, `FreezeObject`, `UnfreezeObject`, `MakeSecret`, `MakePublic`, `DeleteFile`, `SetUserState`, `Subscribe`, `Unsubscribe`, `AnnotateText`, `CreateAnnotation`, `SendMessage`, `EditMessage`, `ReplyMessage`, `CreateChat`, `UploadFile`, `InvokeCommand`, `CreateLink`, `DeleteRelation`, `AddAccessRecord`, `RemoveAllAccessRecords`, `UpdatePerson`, `ChangeSettings`, `CreateReport`, `UpdateReport`, `CreateTask`, `CreateWorkflow`, `AddSignatureRequest`, `CreateAutomationConfig`, `UpdateAutomationConfig`, `DeleteAutomationConfig`, `CreateType`, `UpdateType`, `DeleteType`, `AddTypeChildren`, `AddTypeAttribute`, `UpdateTypeAttribute`, `DeleteTypeAttribute`, `CreateUserState`, `UpdateUserState`, `DeleteUserState`, `CreateStateMachine`, `UpdateStateMachine`, `DeleteStateMachine`.
+Заблокированы: `CreateObject`, `SetAttribute`, `DeleteObject`, `RestoreObject`, `MoveObject`, `LockObject`, `UnlockObject`, `FreezeObject`, `UnfreezeObject`, `MakeSecret`, `MakePublic`, `DeleteFile`, `SetUserState`, `Subscribe`, `Unsubscribe`, `AnnotateText`, `CreateAnnotation`, `SendMessage`, `EditMessage`, `ReplyMessage`, `CreateChat`, `UploadFile`, `InvokeCommand`, `CreateLink`, `DeleteRelation`, `AddAccessRecord`, `RemoveAllAccessRecords`, `UpdatePerson`, `ChangeSettings`, `CreateReport`, `UpdateReport`, `CreateTask`, `CreateWorkflow`, `AddSignatureRequest`, `CreateAutomationConfig`, `UpdateAutomationConfig`, `DeleteAutomationConfig`, `CreateType`, `UpdateType`, `DeleteType`, `AddTypeChildren`, `AddTypeAttribute`, `UpdateTypeAttribute`, `DeleteTypeAttribute`, `CreateUserState`, `UpdateUserState`, `DeleteUserState`, `CreateStateMachine`, `UpdateStateMachine`, `DeleteStateMachine`, `CreatePerson`, `UpdatePersonAdmin`, `DeletePerson`, `CreateOrgUnit`, `UpdateOrgUnit`, `DeleteOrgUnit`, `MoveOrgUnits`, `SetPersonOnPosition`, `RemovePersonFromPosition`.
 
 ---
 
@@ -141,6 +141,28 @@ ExportCsv("tmp/filter_x.jsonl", "C:/result/docs.csv", "name,typeName,created")
 | `GetOrgUnitsByIds`     | Подробная информация об оргединицах по списку ID                  |
 | `GetPersonOnPosition`  | Узнать кто занимает указанную позицию (по positionId)             |
 | `UpdatePerson`         | Обновить email, phone, comment, isInactive пользователя           |
+
+#### Управление пользователями и оргструктурой (админский API)
+
+Инструменты, помеченные `*`, требуют учётную запись **администратора сервера**
+(`PILOT_ADMIN_LOGIN` / `PILOT_ADMIN_PASSWORD`) — см. раздел «Редактирование метаданных» ниже.
+Блокируются режимом `PILOT_READONLY`.
+
+| Инструмент                 | Описание                                                             |
+| -------------------------- | -------------------------------------------------------------------- |
+| `CreatePerson`             | Создать пользователя (логин, имя, пароль, признак администратора) *  |
+| `UpdatePersonAdmin`        | Изменить логин, имя, пароль, isAdmin, активность *                   |
+| `DeletePerson`             | Пометить пользователя удалённым *                                    |
+| `CreateOrgUnit`            | Создать оргединицу: Department / Position / Group *                  |
+| `UpdateOrgUnit`            | Изменить название оргединицы, признак руководителя *                 |
+| `DeleteOrgUnit`            | Пометить оргединицу удалённой (если нет живых дочерних) *            |
+| `MoveOrgUnits`             | Перенести оргединицы к новому родителю *                             |
+| `SetPersonOnPosition`      | Назначить пользователя на должность *                                |
+| `RemovePersonFromPosition` | Освободить должность *                                               |
+
+Особенности сервера, выявленные тестами: новый пользователь **не сможет войти**, пока не назначен
+на должность (`SetPersonOnPosition`); должности не могут находиться в корне оргструктуры —
+только внутри отдела.
 
 
 ### Работа с файлами результатов (pipe-инструменты)

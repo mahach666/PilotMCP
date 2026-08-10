@@ -8,6 +8,8 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <!-- SDK нужен, чтобы проверить фактический вход под созданным пользователем -->
+    <PackageReference Include="Ascon.Pilot.Server.Api" Version="26.1.0" />
     <PackageReference Include="coverlet.collector" Version="6.0.4" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
     <PackageReference Include="xunit" Version="2.9.3" />

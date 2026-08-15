@@ -82,17 +82,40 @@ public class CommandTools
     public CommandTools(PilotConnection connection) => _connection = connection;
 
     [McpServerTool, Description(
-        "Вызвать серверную команду (расширение Pilot Server).")]
+        "Вызвать команду, зарегистрированную серверным расширением Pilot Server (плагином на стороне сервера). " +
+        "Работает ТОЛЬКО с командами расширений, имя которых известно заранее. " +
+        "НЕ вызывает MCP-инструменты, методы SDK или внутренние функции — если нужного действия нет в списке инструментов, " +
+        "InvokeCommand его не заменит, и подбирать имена команд бесполезно.")]
     public Task<string> InvokeCommand(
-        [Description("Имя команды")] string commandName,
-        [Description("Данные в формате base64 (пусто если не нужны)")] string data = "")
+        [Description("Имя команды серверного расширения")] string commandName,
+        [Description("Данные команды в формате base64 (пусто, если не нужны)")] string data = "")
     {
-        return ToolRunner.RunWriteAsync(_connection, "InvokeCommand", $"cmd={commandName}", async () =>
+        return ToolRunner.RunWriteAsync(_connection, "InvokeCommand", $"cmd={commandName}, dataLen={data?.Length ?? 0}", async () =>
         {
-            var requestId = Guid.NewGuid();
-            var bytes = string.IsNullOrEmpty(data) ? Array.Empty<byte>() : Convert.FromBase64String(data);
+            byte[] bytes;
+            try
+            {
+                bytes = string.IsNullOrEmpty(data) ? Array.Empty<byte>() : Convert.FromBase64String(data);
+            }
+            catch (FormatException)
+            {
+                return ToolResult.Error(
+                    "Параметр data не является корректной base64-строкой. " +
+                    "Передайте данные в base64 или пустую строку. Запрос до сервера не дошёл.");
+            }
 
-            await _connection.ServerApi.InvokeCommandAsync(commandName, requestId, bytes);
+            var requestId = Guid.NewGuid();
+            try
+            {
+                await _connection.ServerApi.InvokeCommandAsync(commandName, requestId, bytes);
+            }
+            catch (Exception ex) when (ex.Message.Contains("handler is not registered"))
+            {
+                return ToolResult.Error(
+                    $"Команда '{commandName}' не зарегистрирована на сервере Pilot. " +
+                    "InvokeCommand вызывает только команды серверных расширений; перебирать варианты имени бесполезно — " +
+                    "если команда не зарегистрирована, её не существует. Используйте инструменты из списка MCP.");
+            }
 
             return ToolResult.Ok($"Команда '{commandName}' отправлена. RequestId: {requestId}");
         });

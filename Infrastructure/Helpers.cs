@@ -145,12 +145,14 @@ internal static class Helpers
     }
 
     /// <summary>
-    /// Вычисляет Md5 для массива байт через SDK StreamExtensions.
+    /// Вычисляет MD5 файла через SDK StreamExtensions.
+    /// Возвращает hex-строку в том же формате, что использует Pilot (Md5Ext.ToOldMd5String).
     /// </summary>
-    public static Md5 ComputeMd5(byte[] data)
+    public static string ComputeFileMd5(string filePath)
     {
-        using var stream = new MemoryStream(data);
-        return Ascon.Pilot.Common.Utils.StreamExtensions.ComputeMd5(stream, 81920);
+        using var stream = File.OpenRead(filePath);
+        var md5 = Ascon.Pilot.Common.Utils.StreamExtensions.ComputeMd5(stream, 81920);
+        return Md5Ext.ToOldMd5String(md5);
     }
 
     public static Dictionary<string, DValue>? ParseAttributes(string json)

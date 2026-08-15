@@ -107,6 +107,7 @@ ExportCsv("tmp/filter_x.jsonl", "C:/result/docs.csv", "name,typeName,created")
 | `UploadFile`     | Загрузить файл с диска и прикрепить к объекту                                            |
 | `DeleteFile`     | Удалить файл из объекта по его Body.Id                                                   |
 | `GetFileSize`    | Проверить размер файла в архиве Pilot (без скачивания)                                   |
+| `ComputeFileMd5` | Вычислить MD5-хэш файла из архива Pilot (по Body.Id) или локального файла                |
 
 
 ### Навигация и поиск
@@ -329,7 +330,7 @@ ExportCsv("tmp/filter_x.jsonl", "C:/result/docs.csv", "name,typeName,created")
 
 | Инструмент      | Описание                           |
 | --------------- | ---------------------------------- |
-| `InvokeCommand` | Вызвать серверную команду по имени |
+| `InvokeCommand` | Вызвать команду серверного расширения Pilot Server (только заранее зарегистрированные команды) |
 
 
 ---

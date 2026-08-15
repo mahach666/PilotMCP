@@ -446,6 +446,41 @@ public class ObjectTools
         });
     }
 
+    [McpServerTool, Description(
+        "Вычислить MD5-хэш файла: из архива Pilot (по GUID тела файла, Body.Id) или локального файла (по пути на диске). " +
+        "Возвращает hex-строку в том же формате, что использует Pilot.")]
+    public string ComputeFileMd5(
+        [Description("GUID тела файла (Body.Id) или путь к локальному файлу")] string fileBodyIdOrPath)
+    {
+        return ToolRunner.Run(_connection, "ComputeFileMd5", $"src={fileBodyIdOrPath}", () =>
+        {
+            if (Guid.TryParse(fileBodyIdOrPath, out var bodyId))
+            {
+                var tempPath = Helpers.DownloadToTemp(_connection.FileApi, bodyId, ".bin");
+                try
+                {
+                    var size = new FileInfo(tempPath).Length;
+                    if (size == 0)
+                        return ToolResult.Error($"Файл {bodyId} в архиве пуст или отсутствует (скачано 0 байт).");
+
+                    var md5 = Helpers.ComputeFileMd5(tempPath);
+                    return ToolResult.Ok($"MD5 файла {bodyId} из архива: {md5} (размер: {size} байт)");
+                }
+                finally
+                {
+                    File.Delete(tempPath);
+                }
+            }
+
+            if (!File.Exists(fileBodyIdOrPath))
+                return ToolResult.Error(
+                    $"Файл не найден: {fileBodyIdOrPath}. Укажите GUID тела файла (Body.Id) или путь к существующему локальному файлу.");
+
+            var hash = Helpers.ComputeFileMd5(fileBodyIdOrPath);
+            return ToolResult.Ok($"MD5 файла {fileBodyIdOrPath}: {hash} (размер: {new FileInfo(fileBodyIdOrPath).Length} байт)");
+        });
+    }
+
     // --- inline formatters ---
 
     private string FormatObjectBrief(DObject obj)

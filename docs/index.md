@@ -26,3 +26,4 @@ MCP-сервер для работы с Pilot-ICE через Server API. Поз�
 - Исходный код: [github.com/mahach666/PilotMCP](https://github.com/mahach666/PilotMCP)
 - Готовые сборки: [Releases](https://github.com/mahach666/PilotMCP/releases)
 - MCP Registry: `io.github.mahach666/pilotmcp`
+- DeepWiki: [deepwiki.com/mahach666/PilotMCP](https://deepwiki.com/mahach666/PilotMCP) — автоматически сгенерированный обзор репозитория

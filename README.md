@@ -2,7 +2,7 @@
 
 MCP-сервер для работы с Pilot через Server API. Позволяет LLM-агентам подключаться к серверу Pilot, выполнять поиск, создавать и изменять объекты, работать с документами, историей изменений, правами доступа и чатами.
 
-Документация: https://mahach666.github.io/PilotMCP/
+Документация: https://mahach666.github.io/PilotMCP/ · DeepWiki: https://deepwiki.com/mahach666/PilotMCP
 
 ## Требования
 

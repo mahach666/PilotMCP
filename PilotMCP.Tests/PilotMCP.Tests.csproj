@@ -5,15 +5,29 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <IsPackable>false</IsPackable>
+    <RunSettingsFilePath>$(MSBuildProjectDirectory)\test.runsettings</RunSettingsFilePath>
   </PropertyGroup>
 
   <ItemGroup>
     <!-- SDK нужен, чтобы проверить фактический вход под созданным пользователем -->
-    <PackageReference Include="Ascon.Pilot.Server.Api" Version="26.1.0" />
+    <PackageReference Include="Ascon.Pilot.Server.Api" Version="26.21.0" />
     <PackageReference Include="coverlet.collector" Version="6.0.4" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
+    <PackageReference Include="SkiaSharp" Version="3.119.2" />
     <PackageReference Include="xunit" Version="2.9.3" />
     <PackageReference Include="xunit.runner.visualstudio" Version="3.1.4" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Чистые unit-тесты построения Markup: линкуем исходники без зависимостей от сервера -->
+    <Compile Include="..\DocumentParsing\MarkupBuilder.cs" Link="Linked\MarkupBuilder.cs" />
+    <Compile Include="..\DocumentParsing\AnnotationBuilder.cs" Link="Linked\AnnotationBuilder.cs" />
+    <Compile Include="..\DocumentParsing\XpsTextExtractor.cs" Link="Linked\XpsTextExtractor.cs" />
+    <Compile Include="..\Infrastructure\HelpersValues.cs" Link="Linked\HelpersValues.cs" />
+    <Compile Include="..\Infrastructure\HelpersObjects.cs" Link="Linked\HelpersObjects.cs" />
+    <Compile Include="..\Infrastructure\ReconnectingProxy.cs" Link="Linked\ReconnectingProxy.cs" />
+    <Compile Include="..\Infrastructure\QueryHelpers.cs" Link="Linked\QueryHelpers.cs" />
+    <Compile Include="..\Infrastructure\MessageHelpers.cs" Link="Linked\MessageHelpers.cs" />
   </ItemGroup>
 
   <ItemGroup>

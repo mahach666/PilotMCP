@@ -4,6 +4,7 @@ using Ascon.Pilot.DataModifier;
 using Ascon.Pilot.Server.Api;
 using Ascon.Pilot.Server.Api.Contracts;
 using Ascon.Pilot.Transport;
+using System.Collections.Concurrent;
 using IConnectionLostListener = Ascon.Pilot.Transport.IConnectionLostListener;
 
 namespace PilotMCP;
@@ -24,6 +25,8 @@ public class PilotConnection : IDisposable
     private volatile bool _connectionLost;
     private readonly object _reconnectLock = new();
     private volatile bool _reconnectInProgress;
+    private volatile bool _metadataStale; // сервер сообщил об изменении метаданных — перечитать при следующем обращении
+    private readonly SemaphoreSlim _metadataLock = new(1, 1); // сериализует read-modify-write метаданных
     private readonly List<string> _lastErrors = new();
     private Backend? _backend;
     private FileSystemStorageProvider? _storageProvider;
@@ -108,6 +111,15 @@ public class PilotConnection : IDisposable
 
     public string Connect(string serverUrl, string login, string password, string? databaseName = null, int licenseType = 100)
     {
+        // Тот же lock, что у DoReconnect/EnsureConnected: параллельные логины с одной учёткой выбивают сессии друг друга.
+        lock (_reconnectLock)
+        {
+            return ConnectCore(serverUrl, login, password, databaseName, licenseType);
+        }
+    }
+
+    private string ConnectCore(string serverUrl, string login, string password, string? databaseName, int licenseType)
+    {
         _savedServerUrl = serverUrl;
         _savedLogin = login;
         _savedPassword = password;
@@ -141,7 +153,7 @@ public class PilotConnection : IDisposable
             Console.Error.WriteLine("[PilotMCP] HTTP клиент подключён");
 
             _authApi = _client.GetAuthenticationApi();
-            _callback = new ServerCallback();
+            _callback = new ServerCallback(() => _metadataStale = true);
             _rawServerApi = _client.GetServerAsyncApi(_callback);
             _rawSyncServerApi = _client.GetServerApi(_callback);
             _rawFileApi = _client.GetFileArchiveApi();
@@ -286,19 +298,20 @@ public class PilotConnection : IDisposable
             }
         }
 
+        // Все попытки провалились: не оставляем полуинициализированный клиент (без логина/БД),
+        // который IsConnected считал бы живым. После сброса EnsureConnected сделает полный Connect.
+        TearDownClient();
+        _connectionLost = true;
+
         throw new InvalidOperationException(
             $"Не удалось переподключиться после {maxAttempts} попыток: {lastError!.Message}", lastError);
     }
 
     /// <summary>
-    /// Ядро переподключения — один атомарный цикл: disconnect → connect → login → open.
+    /// Сбрасывает клиент и все производные raw API (после этого IsConnected == false).
     /// </summary>
-    private void DoReconnectCore()
+    private void TearDownClient()
     {
-        _connectionLost = false;
-
-        Console.Error.WriteLine("[PilotMCP] Полное переподключение...");
-
         var oldClient = _client;
         _client = null;
         _rawServerApi = null;
@@ -320,6 +333,18 @@ public class PilotConnection : IDisposable
             disconnectTask.Wait(5000); // Ждём макс 5 секунд
             Console.Error.WriteLine($"[PilotMCP] Старый клиент отключён: {(disconnectTask.IsCompleted ? "ok" : "timeout")}");
         }
+    }
+
+    /// <summary>
+    /// Ядро переподключения — один атомарный цикл: disconnect → connect → login → open.
+    /// </summary>
+    private void DoReconnectCore()
+    {
+        _connectionLost = false;
+
+        Console.Error.WriteLine("[PilotMCP] Полное переподключение...");
+
+        TearDownClient();
 
         if (string.IsNullOrEmpty(_savedServerUrl) || string.IsNullOrEmpty(_savedLogin))
             throw new InvalidOperationException("Нет сохранённых креденшалов для переподключения.");
@@ -342,7 +367,7 @@ public class PilotConnection : IDisposable
         Console.Error.WriteLine("[PilotMCP] DoReconnect: HTTP клиент создан");
 
         _authApi = _client.GetAuthenticationApi();
-        _callback = new ServerCallback();
+        _callback = new ServerCallback(() => _metadataStale = true);
         _rawServerApi = _client.GetServerAsyncApi(_callback);
         _rawSyncServerApi = _client.GetServerApi(_callback);
         _rawFileApi = _client.GetFileArchiveApi();
@@ -410,15 +435,27 @@ public class PilotConnection : IDisposable
     public async Task<long> UpdateMetadataViaAdminAsync(Action<DMetadata> mutate)
     {
         EnsureConnected();
-        return await WithAdminApiAsync(async admin =>
+        // Read-modify-write всего объекта метаданных: без сериализации параллельные вызовы
+        // (CreateType + AddTypeAttribute) читают одну версию и затирают изменения друг друга.
+        // Между процессами PilotMCP это не защищает.
+        await _metadataLock.WaitAsync();
+        try
         {
-            var meta = await admin.GetMetadataAsync(DatabaseName, 0);
-            mutate(meta);
-            var newVersion = await admin.UpdateMetadataAsync(DatabaseName, meta);
-            meta.Version = newVersion;
-            _metadata = meta;
-            return newVersion;
-        });
+            return await WithAdminApiAsync(async admin =>
+            {
+                var meta = await admin.GetMetadataAsync(DatabaseName, 0);
+                mutate(meta);
+                var newVersion = await admin.UpdateMetadataAsync(DatabaseName, meta);
+                meta.Version = newVersion;
+                _metadata = meta;
+                _metadataStale = true; // Backend SDK кеширует типы — пересоздать при следующем обращении
+                return newVersion;
+            });
+        }
+        finally
+        {
+            _metadataLock.Release();
+        }
     }
 
     private IServerAdminAsyncApi GetOrCreateAdminApi()
@@ -485,10 +522,70 @@ public class PilotConnection : IDisposable
     public async Task<DSearchResult?> SearchAsync(DSearchDefinition searchDef, int timeoutMs = 30000)
     {
         EnsureConnected();
-        _callback!.PrepareForSearch(searchDef.Id);
-        await ServerApi.AddSearchAsync(searchDef);
-        var result = await _callback.WaitForSearchResultAsync(searchDef.Id, timeoutMs);
-        return result;
+        var cb = _callback ?? throw new InvalidOperationException(NotConnectedMessage);
+        cb.PrepareForSearch(searchDef.Id);
+        try
+        {
+            await ServerApi.AddSearchAsync(searchDef);
+            return await cb.WaitForSearchResultAsync(searchDef.Id, timeoutMs);
+        }
+        finally
+        {
+            cb.ForgetSearch(searchDef.Id);
+        }
+    }
+
+    /// <summary>
+    /// Применяет изменения (apply — вызов modifier.Apply(...), возвращающий Identity changeset-а)
+    /// и ждёт ответа сервера: Backend.Apply только отправляет ChangeAsync, а результат приходит
+    /// в NotifyChangeAsyncCompleted/NotifyChangeAsyncError с тем же Identity.
+    /// Отказ сервера или отсутствие ответа за timeoutMs → исключение с понятным текстом.
+    /// </summary>
+    public Guid ApplyAndWait(Func<Guid> apply, int timeoutMs = 60000)
+    {
+        var id = apply();
+        var cb = _callback ?? throw new InvalidOperationException(NotConnectedMessage);
+        var tcs = cb.ChangeResult(id);
+        try
+        {
+            if (!tcs.Task.Wait(timeoutMs))
+                throw new TimeoutException(
+                    $"Сервер не подтвердил изменение за {timeoutMs / 1000} с (changeset {id}). " +
+                    "Результат неизвестен: проверьте состояние объекта перед повторной попыткой.");
+        }
+        finally
+        {
+            cb.ForgetChange(id);
+        }
+
+        var error = tcs.Task.Result;
+        if (error != null)
+            throw new InvalidOperationException($"Сервер отклонил изменение: {error}");
+        return id;
+    }
+
+    /// <summary>
+    /// Вызывает серверную команду и ждёт NotifyCommandResult. null — результат не пришёл за timeoutMs.
+    /// </summary>
+    public async Task<(bool Success, byte[] Data)?> InvokeCommandAsync(
+        string commandName, Guid requestId, byte[] data, int timeoutMs = 15000)
+    {
+        EnsureConnected();
+        var cb = _callback ?? throw new InvalidOperationException(NotConnectedMessage);
+        var tcs = cb.CommandResult(requestId);
+        try
+        {
+            await ServerApi.InvokeCommandAsync(commandName, requestId, data);
+            return await tcs.Task.WaitAsync(TimeSpan.FromMilliseconds(timeoutMs));
+        }
+        catch (TimeoutException) when (!tcs.Task.IsCompleted)
+        {
+            return null;
+        }
+        finally
+        {
+            cb.ForgetCommand(requestId);
+        }
     }
 
     public void Disconnect()
@@ -521,14 +618,44 @@ public class PilotConnection : IDisposable
 
     public void EnsureConnected()
     {
-        if (IsConnected)
+        // Под тем же lock, что DoReconnect/Connect: пока другой поток переподключается (клиент временно null),
+        // параллельные вызовы ждут, а не запускают конкурирующие логины.
+        lock (_reconnectLock)
         {
-            if (_backend == null)
-                RebuildBackend();
-            return;
-        }
+            if (IsConnected)
+            {
+                if (_backend == null)
+                    RebuildBackend();
+                if (_metadataStale)
+                    RefreshMetadata();
+                return;
+            }
 
-        Reconnect();
+            Reconnect();
+        }
+    }
+
+    /// <summary>
+    /// Перечитывает метаданные после NotifyDMetadataChangeset (или записи через админ-API)
+    /// и пересоздаёт Backend, который кеширует типы. При сбое остаёмся на старых данных и повторим при следующем вызове.
+    /// </summary>
+    private void RefreshMetadata()
+    {
+        _metadataStale = false;
+        try
+        {
+            var api = _rawServerApi!;
+            var info = Task.Run(() => api.OpenDatabaseAsync()).GetAwaiter().GetResult();
+            var meta = Task.Run(() => api.GetMetadataAsync(info?.MetadataVersion ?? 0)).GetAwaiter().GetResult();
+            _dbInfo = info;
+            _metadata = meta;
+            RebuildBackend();
+        }
+        catch (Exception ex)
+        {
+            _metadataStale = true;
+            Console.Error.WriteLine($"[PilotMCP] Не удалось обновить метаданные: {ex.GetType().Name}: {ex.Message}");
+        }
     }
 
     private void Reconnect()
@@ -564,21 +691,35 @@ public class PilotConnection : IDisposable
 
     private class ServerCallback : IServerCallback
     {
-        private readonly Dictionary<Guid, TaskCompletionSource<DSearchResult>> _searchWaiters = new();
+        private readonly ConcurrentDictionary<Guid, TaskCompletionSource<DSearchResult>> _searchWaiters = new();
+        // null в результате = успех, строка = текст ошибки сервера. GetOrAdd с обеих сторон:
+        // ответ может прийти раньше, чем вызывающий начнёт ждать.
+        private readonly ConcurrentDictionary<Guid, TaskCompletionSource<string?>> _changeResults = new();
+        private readonly ConcurrentDictionary<Guid, TaskCompletionSource<(bool, byte[])?>> _commandResults = new();
+        private readonly Action _onMetadataChanged;
 
-        public void PrepareForSearch(Guid searchId)
-        {
-            _searchWaiters[searchId] = new TaskCompletionSource<DSearchResult>(TaskCreationOptions.RunContinuationsAsynchronously);
-        }
+        public ServerCallback(Action onMetadataChanged) => _onMetadataChanged = onMetadataChanged;
 
+        private static TaskCompletionSource<T> NewTcs<T>() => new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public void PrepareForSearch(Guid searchId) => _searchWaiters[searchId] = NewTcs<DSearchResult>();
+
+        public void ForgetSearch(Guid searchId) => _searchWaiters.TryRemove(searchId, out _);
+
+        /// <summary>Ждёт результат поиска; по таймауту бросает TimeoutException (а не возвращает «пусто»).</summary>
         public async Task<DSearchResult?> WaitForSearchResultAsync(Guid searchId, int timeoutMs)
         {
             if (!_searchWaiters.TryGetValue(searchId, out var tcs))
                 return null;
 
-            var completed = await Task.WhenAny(tcs.Task, Task.Delay(timeoutMs));
-            _searchWaiters.Remove(searchId);
-            return completed == tcs.Task ? tcs.Task.Result : null;
+            try
+            {
+                return await tcs.Task.WaitAsync(TimeSpan.FromMilliseconds(timeoutMs));
+            }
+            catch (TimeoutException)
+            {
+                throw new TimeoutException($"Сервер не вернул результат поиска за {timeoutMs / 1000} с.");
+            }
         }
 
         public void NotifySearchResult(DSearchResult searchResult)
@@ -589,15 +730,22 @@ public class PilotConnection : IDisposable
             }
         }
 
+        public TaskCompletionSource<string?> ChangeResult(Guid identity) => _changeResults.GetOrAdd(identity, _ => NewTcs<string?>());
+        public void ForgetChange(Guid identity) => _changeResults.TryRemove(identity, out _);
+        public TaskCompletionSource<(bool, byte[])?> CommandResult(Guid requestId) => _commandResults.GetOrAdd(requestId, _ => NewTcs<(bool, byte[])?>());
+        public void ForgetCommand(Guid requestId) => _commandResults.TryRemove(requestId, out _);
+
         public void NotifyChangeset(DChangeset changeset) { }
         public void NotifyOrganisationUnitChangeset(OrganisationUnitChangeset changeset) { }
         public void NotifyPersonChangeset(PersonChangeset changeset) { }
-        public void NotifyDMetadataChangeset(DMetadataChangeset changeset) { }
+        public void NotifyDMetadataChangeset(DMetadataChangeset changeset) => _onMetadataChanged();
         public void NotifyGeometrySearchResult(DGeometrySearchResult searchResult) { }
         public void NotifyDNotificationChangeset(DNotificationChangeset changeset) { }
-        public void NotifyCommandResult(Guid requestId, byte[] data, ServerCommandResult result) { }
-        public void NotifyChangeAsyncCompleted(DChangeset changeset) { }
-        public void NotifyChangeAsyncError(Guid identity, ProtoExceptionInfo exception) { }
+        public void NotifyCommandResult(Guid requestId, byte[] data, ServerCommandResult result)
+            => CommandResult(requestId).TrySetResult((result == ServerCommandResult.Success, data));
+        public void NotifyChangeAsyncCompleted(DChangeset changeset) => ChangeResult(changeset.Identity).TrySetResult(null);
+        public void NotifyChangeAsyncError(Guid identity, ProtoExceptionInfo exception)
+            => ChangeResult(identity).TrySetResult(ProtoExceptionInfo.Deserialize(exception).Message);
         public void NotifyCustomNotification(string name, byte[] data) { }
         public void NotifyAccessChangeset(Guid objectId) { }
         public void NotifySettingsChangeset(string settingKey) { }
@@ -643,6 +791,7 @@ public class PilotConnection : IDisposable
     private class MessageCallback : IMessageCallback
     {
         public void NotifyMessageCreated(NotifiableDMessage message) { }
+        public void NotifyMessagesCreated(List<NotifiableDMessage> messages) { }
         public void NotifyTypingMessage(Guid chatId, int personId) { }
         public void NotifyOnline(int personId) { }
         public void NotifyOffline(int personId) { }

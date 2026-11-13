@@ -30,8 +30,12 @@ public class QueryTools
     public Task<string> SearchByText(
         [Description("Текст для поиска (слово или фраза).")] string text,
         [Description("Макс. результатов.")] int maxResults = 100)
-        => ExecuteSearch("SearchByText", b => b.Must(ObjectFields.AllText.ContainsAll(
-            text.Split(' ', StringSplitOptions.RemoveEmptyEntries))), maxResults, info: text);
+    {
+        var words = QueryHelpers.EscapedWords(text);
+        if (words.Length == 0)
+            return Task.FromResult(ToolResult.Error("Пустой текст поиска."));
+        return ExecuteSearch("SearchByText", b => b.Must(ObjectFields.AllText.ContainsAll(words)), maxResults, info: text);
+    }
 
     [McpServerTool, Description(
         "Поиск объектов внутри папки (рекурсивно по всем вложенным). " +
@@ -48,7 +52,7 @@ public class QueryTools
         {
             b.Must(ObjectFields.Context.Be(guid));
             if (!isWildcard)
-                b.Must(ObjectFields.AllText.ContainsAll(query.Split(' ', StringSplitOptions.RemoveEmptyEntries)));
+                b.Must(ObjectFields.AllText.ContainsAll(QueryHelpers.EscapedWords(query)));
         }, maxResults, info: $"контекст: {contextId}");
     }
 
@@ -60,13 +64,19 @@ public class QueryTools
         => ExecuteSearch("SearchByType", b => b.Must(ObjectFields.TypeId.Be(typeId)), maxResults, info: $"typeId={typeId}");
 
     [McpServerTool, Description(
-        "Поиск объектов по значению атрибута. Например: attributeName='$Title', value='Договор'.")]
+        "Поиск объектов по значению СТРОКОВОГО атрибута (числовые, даты, состояния, орг. единицы не находятся). " +
+        "Значение ищется как точная фраза, в т.ч. из нескольких слов. Например: attributeName='$Title', value='Договор'.")]
     public Task<string> SearchByAttribute(
         [Description("Имя атрибута (например '$Title', 'code', 'mark').")] string attributeName,
         [Description("Значение атрибута для поиска.")] string value,
         [Description("Макс. результатов.")] int maxResults = 100)
-        => ExecuteSearch("SearchByAttribute", b => b.Must(AttributeFields.String(attributeName).Be(value)),
+    {
+        if (string.IsNullOrWhiteSpace(attributeName) || string.IsNullOrWhiteSpace(value))
+            return Task.FromResult(ToolResult.Error("Укажите непустые attributeName и value."));
+        return ExecuteSearch("SearchByAttribute",
+            b => b.Must(AttributeFields.String(attributeName.Trim()).Be(QueryHelpers.QuoteLucene(value.Trim()))),
             maxResults, info: $"{attributeName}={value}");
+    }
 
     [McpServerTool, Description(
         "Поиск объектов по пользовательскому состоянию (UserState). " +
@@ -90,14 +100,14 @@ public class QueryTools
             maxResults, info: $"creator={creatorId}");
 
     [McpServerTool, Description(
-        "Поиск объектов по дате создания (диапазон).")]
+        "Поиск объектов по дате создания (диапазон, время в UTC; дата без времени = UTC).")]
     public Task<string> SearchByDate(
         [Description("Дата ОТ (ISO 8601, например '2025-01-01'). Пусто = без нижней границы.")] string from = "",
-        [Description("Дата ДО (ISO 8601). Пусто = до сегодня.")] string to = "",
+        [Description("Дата ДО (ISO 8601, включительно: '2025-01-31' = весь день 31 января). Пусто = без верхней границы.")] string to = "",
         [Description("Макс. результатов.")] int maxResults = 1000)
     {
-        var dateFrom = !string.IsNullOrEmpty(from) && DateTime.TryParse(from, out var f) ? f.ToUniversalTime() : DateTime.MinValue;
-        var dateTo = !string.IsNullOrEmpty(to) && DateTime.TryParse(to, out var t) ? t.ToUniversalTime() : DateTime.MaxValue;
+        if (QueryHelpers.ParseRange(from, to, "ОТ", "ДО", out var dateFrom, out var dateTo) is { } dateError)
+            return Task.FromResult(ToolResult.Error(dateError));
         return ExecuteSearch("SearchByDate", b => b.Must(ObjectFields.CreatedDate.BeInRange(dateFrom, dateTo)),
             maxResults, info: $"{from}..{to}");
     }
@@ -113,35 +123,49 @@ public class QueryTools
         [Description("ID типа объекта (0 = любой).")] int typeId = 0,
         [Description("ID создателя (0 = любой).")] int creatorId = 0,
         [Description("GUID состояния.")] string stateId = "",
-        [Description("Дата создания ОТ (ISO 8601).")] string createdFrom = "",
-        [Description("Дата создания ДО (ISO 8601).")] string createdTo = "",
-        [Description("Фильтр по атрибуту: 'имя=значение'.")] string attribute = "",
+        [Description("Дата создания ОТ (ISO 8601, UTC).")] string createdFrom = "",
+        [Description("Дата создания ДО (ISO 8601, включительно: '2025-01-31' = весь день).")] string createdTo = "",
+        [Description("Фильтр по строковому атрибуту: 'имя=значение' (значение ищется как фраза).")] string attribute = "",
         [Description("Исключить замороженные.")] bool excludeFrozen = false)
     {
+        var isWildcard = string.IsNullOrWhiteSpace(query) || query.Trim() == "*";
+        var words = isWildcard ? Array.Empty<string>() : QueryHelpers.EscapedWords(query);
+
+        // Некорректные фильтры — ошибка, а не молчаливо более широкий поиск.
+        Guid ctx = Guid.Empty, st = Guid.Empty;
+        if (!string.IsNullOrWhiteSpace(context) && (!Guid.TryParse(context, out ctx) || ctx == Guid.Empty))
+            return Task.FromResult(ToolResult.Error($"Некорректный GUID контекста: {context}"));
+        if (!string.IsNullOrWhiteSpace(stateId) && (!Guid.TryParse(stateId, out st) || st == Guid.Empty))
+            return Task.FromResult(ToolResult.Error($"Некорректный GUID состояния: {stateId}"));
+        var hasDates = !string.IsNullOrWhiteSpace(createdFrom) || !string.IsNullOrWhiteSpace(createdTo);
+        DateTime from = DateTime.MinValue, to = DateTime.MaxValue;
+        if (hasDates && QueryHelpers.ParseRange(createdFrom, createdTo, "createdFrom", "createdTo", out from, out to) is { } dateError)
+            return Task.FromResult(ToolResult.Error(dateError));
+        string? attrName = null, attrValue = null;
+        if (!string.IsNullOrWhiteSpace(attribute))
+        {
+            var parts = attribute.Split('=', 2);
+            if (parts.Length != 2 || parts[0].Trim().Length == 0 || parts[1].Trim().Length == 0)
+                return Task.FromResult(ToolResult.Error($"Фильтр атрибута должен быть вида 'имя=значение': {attribute}"));
+            (attrName, attrValue) = (parts[0].Trim(), parts[1].Trim());
+        }
+
         return ExecuteSearch("Search", b =>
         {
-            var isWildcard = string.IsNullOrWhiteSpace(query) || query.Trim() == "*";
-            if (!isWildcard)
-                b.Must(ObjectFields.AllText.ContainsAll(query.Split(' ', StringSplitOptions.RemoveEmptyEntries)));
-            if (!string.IsNullOrEmpty(context) && Guid.TryParse(context, out var ctx) && ctx != Guid.Empty)
+            if (words.Length > 0)
+                b.Must(ObjectFields.AllText.ContainsAll(words));
+            if (ctx != Guid.Empty)
                 b.Must(ObjectFields.Context.Be(ctx));
             if (typeId > 0)
                 b.Must(ObjectFields.TypeId.Be(typeId));
             if (creatorId > 0)
                 b.Must(ObjectFields.CreatorId.Be(creatorId));
-            if (!string.IsNullOrEmpty(stateId) && Guid.TryParse(stateId, out var st) && st != Guid.Empty)
+            if (st != Guid.Empty)
                 b.Must(ObjectFields.StateId.Be(st));
-            if (!string.IsNullOrEmpty(createdFrom) || !string.IsNullOrEmpty(createdTo))
-            {
-                var from = !string.IsNullOrEmpty(createdFrom) && DateTime.TryParse(createdFrom, out var f) ? f.ToUniversalTime() : DateTime.MinValue;
-                var to = !string.IsNullOrEmpty(createdTo) && DateTime.TryParse(createdTo, out var t) ? t.ToUniversalTime() : DateTime.MaxValue;
+            if (hasDates)
                 b.Must(ObjectFields.CreatedDate.BeInRange(from, to));
-            }
-            if (!string.IsNullOrEmpty(attribute) && attribute.Contains('='))
-            {
-                var parts = attribute.Split('=', 2);
-                b.Must(AttributeFields.String(parts[0].Trim()).Be(parts[1].Trim()));
-            }
+            if (attrName != null)
+                b.Must(AttributeFields.String(attrName).Be(QueryHelpers.QuoteLucene(attrValue!)));
             if (excludeFrozen)
                 b.MustNot(ObjectFields.ObjectState.Be(ObjectState.Frozen));
         }, maxResults, info: query);
@@ -181,12 +205,15 @@ public class QueryTools
             var logArgs = $"searchString='{searchString}', maxResults={maxResults}, info='{info}'";
             ToolLogger.Log(toolName, logArgs, "Executing...");
 
+            // Таймаут — исключение из SearchAsync (попадёт в catch как ошибка, а не «пусто»).
+            // Один повтор при пустом результате (индекс может отставать), пауза только перед повтором.
             DSearchResult? result = null;
-            for (int attempt = 0; attempt < 3; attempt++)
+            for (int attempt = 0; attempt < 2; attempt++)
             {
                 if (attempt > 0)
                 {
-                    ToolLogger.Log(toolName, logArgs, $"Retry {attempt}...");
+                    ToolLogger.Log(toolName, logArgs, "Retry...");
+                    await Task.Delay(500);
                     searchDef = new DSearchDefinition
                     {
                         Id = Guid.NewGuid(),
@@ -195,23 +222,27 @@ public class QueryTools
                     if (!string.IsNullOrEmpty(typeFilter))
                         searchDef.Request.TypeFilter = typeFilter;
                 }
-                result = await _connection.SearchAsync(searchDef);
-                if (result?.Found != null && result.Found.Any())
+                result = await _connection.SearchAsync(searchDef)
+                    ?? throw new InvalidOperationException("Сервер не вернул результат поиска.");
+                if (result.Found != null && result.Found.Any())
                     break;
-                await Task.Delay(500); // пауза перед retry
             }
 
             if (result?.Found == null || !result.Found.Any())
             {
-                ToolLogger.Log(toolName, logArgs, "0 results after retries");
+                ToolLogger.Log(toolName, logArgs, "0 results");
                 return ToolResult.Ok("Поиск не дал результатов.");
             }
 
             var foundIds = result.Found.ToArray();
-            var objects = await _connection.ServerApi.GetObjectsAsync(foundIds);
+            var objects = await GetObjectsBatchedAsync(foundIds);
 
             var (path, count) = WriteObjects(objects, "search");
             var msg = $"Найдено {count} объектов" + (info != null ? $" ({info})" : "");
+            if (result.TotalResults > foundIds.Length)
+                msg += $". Результат неполный: сервер нашёл {result.TotalResults}, возвращено {foundIds.Length} (maxResults={maxResults}). Сузьте запрос";
+            if (count < foundIds.Length)
+                msg += $". Загружено {count} из {foundIds.Length} найденных (остальные недоступны или удалены)";
             ToolLogger.Log(toolName, logArgs, msg);
             return ToolResult.File(path, count, ObjectColumns, msg);
         }
@@ -222,56 +253,75 @@ public class QueryTools
         }
     }
 
+    private const int GetObjectsBatchSize = 500;
+
+    /// <summary>Загружает объекты порциями, чтобы не упереться в лимит размера сообщения транспорта.</summary>
+    private async Task<List<DObject>> GetObjectsBatchedAsync(Guid[] ids)
+    {
+        var all = new List<DObject>(ids.Length);
+        foreach (var chunk in ids.Chunk(GetObjectsBatchSize))
+        {
+            var part = await _connection.ServerApi.GetObjectsAsync(chunk);
+            if (part != null) all.AddRange(part);
+        }
+        return all;
+    }
+
+    /// <summary>Загружает потомков объекта-родителя и пишет их в файл; сообщает, если часть не загрузилась.</summary>
+    private async Task<string> LoadChildrenAsync(string toolName, Guid parentGuid, string parentLabel, string prefix,
+        Func<int, string> okMessage, string noParentMessage, string emptyMessage)
+    {
+        try
+        {
+            _connection.EnsureConnected();
+            var parents = await _connection.ServerApi.GetObjectsAsync(new[] { parentGuid });
+            if (parents == null || parents.Count == 0)
+                return ToolResult.Error(noParentMessage);
+
+            var parent = parents[0];
+            if (!parent.Children.Any())
+                return ToolResult.Ok(emptyMessage);
+
+            var childIds = parent.Children.Select(c => c.ObjectId).ToArray();
+            var children = await GetObjectsBatchedAsync(childIds);
+
+            var (path, count) = WriteObjects(children, prefix);
+            var msg = okMessage(count);
+            if (count < childIds.Length)
+                msg += $". Загружено {count} из {childIds.Length} (остальные недоступны или удалены)";
+            return ToolResult.File(path, count, ObjectColumns, msg);
+        }
+        catch (Exception ex)
+        {
+            ToolLogger.LogError(toolName, parentLabel, ex);
+            return ToolResult.Error($"Ошибка: {ex.InnerException?.Message ?? ex.Message}");
+        }
+    }
+
     [McpServerTool, Description("Получить дочерние объекты. Результат записывается в файл (JSONL).")]
-    public async Task<string> GetChildren(
+    public Task<string> GetChildren(
         [Description("GUID родительского объекта. Корень базы: 00000001-0001-0001-0001-000000000001")] string parentId)
     {
-        _connection.EnsureConnected();
-        if (!Guid.TryParse(parentId, out var guid))
-            return ToolResult.Error($"Некорректный GUID: {parentId}");
-
-        var parents = await _connection.ServerApi.GetObjectsAsync(new[] { guid });
-        if (parents == null || parents.Count == 0)
-            return ToolResult.Error($"Объект {parentId} не найден.");
-
-        var parent = parents[0];
-        if (!parent.Children.Any())
-            return ToolResult.Ok($"У объекта {parentId} нет дочерних объектов.");
-
-        var childIds = parent.Children.Select(c => c.ObjectId).ToArray();
-        var children = await _connection.ServerApi.GetObjectsAsync(childIds);
-
-        var (path, count) = WriteObjects(children, "children");
-        return ToolResult.File(path, count, ObjectColumns,
-            $"{count} дочерних объектов у {parentId}");
+        if (!Guid.TryParse(parentId, out var guid) || guid == Guid.Empty)
+            return Task.FromResult(ToolResult.Error($"Некорректный GUID: {parentId}"));
+        return LoadChildrenAsync("GetChildren", guid, parentId, "children",
+            count => $"{count} дочерних объектов у {parentId}",
+            $"Объект {parentId} не найден.", $"У объекта {parentId} нет дочерних объектов.");
     }
 
     [McpServerTool, Description("Получить корневые объекты базы Pilot. Результат записывается в файл (JSONL).")]
-    public async Task<string> GetRootObjects()
-    {
-        _connection.EnsureConnected();
-        var roots = await _connection.ServerApi.GetObjectsAsync(new[] { DObject.RootId });
-        if (roots == null || roots.Count == 0)
-            return ToolResult.Error("Корневые объекты не найдены.");
-
-        var root = roots[0];
-        if (!root.Children.Any())
-            return ToolResult.Ok("Корень пуст.");
-
-        var childIds = root.Children.Select(c => c.ObjectId).ToArray();
-        var children = await _connection.ServerApi.GetObjectsAsync(childIds);
-
-        var (path, count) = WriteObjects(children, "root");
-        return ToolResult.File(path, count, ObjectColumns,
-            $"{count} корневых объектов");
-    }
+    public Task<string> GetRootObjects()
+        => LoadChildrenAsync("GetRootObjects", DObject.RootId, "root", "root",
+            count => $"{count} корневых объектов",
+            "Корневые объекты не найдены.", "Корень пуст.");
 
     [McpServerTool, Description("Получить несколько объектов по их GUID и записать в файл.")]
     public async Task<string> GetObjectsToFile(
         [Description("GUID идентификаторы через запятую")] string objectIds)
     {
-        _connection.EnsureConnected();
         var ids = objectIds.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (ids.Length == 0)
+            return ToolResult.Error("Не указаны GUID объектов.");
         var guids = new List<Guid>();
         foreach (var id in ids)
         {
@@ -279,9 +329,21 @@ public class QueryTools
             else return ToolResult.Error($"Некорректный GUID: {id}");
         }
 
-        var objects = await _connection.ServerApi.GetObjectsAsync(guids.ToArray());
-        var (path, count) = WriteObjects(objects, "objects");
-        return ToolResult.File(path, count, ObjectColumns, $"{count} объектов загружено");
+        try
+        {
+            _connection.EnsureConnected();
+            var objects = await GetObjectsBatchedAsync(guids.ToArray());
+            var (path, count) = WriteObjects(objects, "objects");
+            var msg = $"{count} объектов загружено";
+            if (count < guids.Count)
+                msg += $" из {guids.Count} запрошенных (остальные не найдены или недоступны)";
+            return ToolResult.File(path, count, ObjectColumns, msg);
+        }
+        catch (Exception ex)
+        {
+            ToolLogger.LogError("GetObjectsToFile", objectIds, ex);
+            return ToolResult.Error($"Ошибка: {ex.InnerException?.Message ?? ex.Message}");
+        }
     }
 
     [McpServerTool, Description("Получить список типов объектов и записать в файл (JSONL). Работает из кэша — не требует активного соединения.")]

@@ -12,6 +12,14 @@ namespace PilotMCP;
 [McpServerToolType]
 public class TransformTools
 {
+    /// <summary>Вход не JSONL: закрываем и удаляем недописанный выход, возвращаем понятную ошибку.</summary>
+    private static string BadJsonl(string inputFile, string outPath, StreamWriter writer, JsonException ex)
+    {
+        writer.Dispose();
+        File.Delete(outPath);
+        return ToolResult.Error($"Файл {inputFile} не является JSONL (одна JSON-запись на строку): {ex.Message}");
+    }
+
     [McpServerTool, Description("Извлечь указанные поля из файла результатов. Создаёт новый файл только с выбранными колонками.")]
     public string ExtractFields(
         [Description("Путь к файлу результатов (JSONL)")] string inputFile,
@@ -26,19 +34,26 @@ public class TransformTools
             return ToolResult.Error("Не указаны поля для извлечения.");
 
         var outPath = outputFile ?? TempFiles.NewPath("extract");
+        if (QueryHelpers.PrepareOutput(inputFile, outPath) is { } pathError)
+            return ToolResult.Error(pathError);
         int count = 0;
 
-        using var writer = new StreamWriter(outPath, false, Encoding.UTF8);
-        foreach (var row in TempFiles.ReadJsonl(inputFile))
+        using var writer = new StreamWriter(outPath, false, new UTF8Encoding(false));
+        try
         {
-            var extracted = new Dictionary<string, object>();
-            foreach (var f in fieldNames)
+            foreach (var row in TempFiles.ReadJsonl(inputFile))
             {
-                if (row.TryGetValue(f, out var val))
-                    extracted[f] = val;
+                // Поле, которого нет в записи, пишем как null: у всех строк один и тот же набор ключей.
+                var extracted = new Dictionary<string, object?>();
+                foreach (var f in fieldNames)
+                    extracted[f] = row.TryGetValue(f, out var val) ? val : null;
+                writer.WriteLine(JsonSerializer.Serialize(extracted));
+                count++;
             }
-            writer.WriteLine(JsonSerializer.Serialize(extracted));
-            count++;
+        }
+        catch (JsonException ex)
+        {
+            return BadJsonl(inputFile, outPath, writer, ex);
         }
 
         return ToolResult.File(outPath, count, fieldNames,
@@ -56,22 +71,31 @@ public class TransformTools
             return ToolResult.Error($"Файл не найден: {inputFile}");
 
         var outPath = outputFile ?? TempFiles.NewPath("filter");
+        if (QueryHelpers.PrepareOutput(inputFile, outPath) is { } pathError)
+            return ToolResult.Error(pathError);
         int count = 0;
         string[]? columns = null;
 
-        using var writer = new StreamWriter(outPath, false, Encoding.UTF8);
-        foreach (var row in TempFiles.ReadJsonl(inputFile))
+        using var writer = new StreamWriter(outPath, false, new UTF8Encoding(false));
+        try
         {
-            columns ??= row.Keys.ToArray();
-            if (row.TryGetValue(field, out var fieldVal))
+            foreach (var row in TempFiles.ReadJsonl(inputFile))
             {
-                var strVal = fieldVal.ToString();
-                if (strVal.Contains(value, StringComparison.OrdinalIgnoreCase))
+                columns ??= row.Keys.ToArray();
+                if (row.TryGetValue(field, out var fieldVal))
                 {
-                    writer.WriteLine(JsonSerializer.Serialize(row));
-                    count++;
+                    var strVal = fieldVal.ToString();
+                    if (strVal.Contains(value, StringComparison.OrdinalIgnoreCase))
+                    {
+                        writer.WriteLine(JsonSerializer.Serialize(row));
+                        count++;
+                    }
                 }
             }
+        }
+        catch (JsonException ex)
+        {
+            return BadJsonl(inputFile, outPath, writer, ex);
         }
 
         return ToolResult.File(outPath, count, columns ?? Array.Empty<string>(),
@@ -87,15 +111,24 @@ public class TransformTools
         if (!File.Exists(inputFile))
             return ToolResult.Error($"Файл не найден: {inputFile}");
 
+        if (QueryHelpers.PrepareOutput(inputFile, outputFile) is { } pathError)
+            return ToolResult.Error(pathError);
         int count = 0;
-        using var writer = new StreamWriter(outputFile, false, Encoding.UTF8);
-        foreach (var row in TempFiles.ReadJsonl(inputFile))
+        using var writer = new StreamWriter(outputFile, false, new UTF8Encoding(false));
+        try
         {
-            if (row.TryGetValue(field, out var val))
+            foreach (var row in TempFiles.ReadJsonl(inputFile))
             {
-                writer.WriteLine(val.ToString());
-                count++;
+                if (row.TryGetValue(field, out var val))
+                {
+                    writer.WriteLine(val.ToString());
+                    count++;
+                }
             }
+        }
+        catch (JsonException ex)
+        {
+            return BadJsonl(inputFile, outputFile, writer, ex);
         }
 
         return ToolResult.Ok($"Записано {count} значений поля \"{field}\" в {outputFile}");
@@ -119,19 +152,29 @@ public class InspectTools
             return ToolResult.Error($"Файл не найден: {inputFile}");
 
         take = Math.Clamp(take, 1, 20);
+        skip = Math.Max(0, skip);
         var total = TempFiles.CountLines(inputFile);
+        if (skip >= total)
+            return $"Записей в файле: {total}. skip={skip} за пределами файла.";
         var sb = new StringBuilder();
         sb.AppendLine($"Записей в файле: {total}. Показано {skip + 1}–{Math.Min(skip + take, total)}:");
         sb.AppendLine();
 
         int index = 0;
-        foreach (var row in TempFiles.ReadJsonl(inputFile))
+        try
         {
-            if (index < skip) { index++; continue; }
-            if (index >= skip + take) break;
+            foreach (var row in TempFiles.ReadJsonl(inputFile))
+            {
+                if (index < skip) { index++; continue; }
+                if (index >= skip + take) break;
 
-            sb.AppendLine($"[{index}] {JsonSerializer.Serialize(row)}");
-            index++;
+                sb.AppendLine($"[{index}] {JsonSerializer.Serialize(row)}");
+                index++;
+            }
+        }
+        catch (JsonException ex)
+        {
+            return ToolResult.Error($"Файл {inputFile} не является JSONL: {ex.Message}");
         }
 
         if (skip + take < total)
@@ -151,6 +194,7 @@ public class InspectTools
         if (!File.Exists(filePath))
             return ToolResult.Error($"Файл не найден: {filePath}");
 
+        offset = Math.Max(0, offset);
         var content = File.ReadAllText(filePath, Encoding.UTF8);
         var totalLength = content.Length;
 
@@ -203,38 +247,45 @@ public class ExportTools
         if (!File.Exists(inputFile))
             return ToolResult.Error($"Файл не найден: {inputFile}");
 
-        var dir = Path.GetDirectoryName(outputFile);
-        if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
-            Directory.CreateDirectory(dir);
+        if (QueryHelpers.PrepareOutput(inputFile, outputFile) is { } pathError)
+            return ToolResult.Error(pathError);
+        if (string.IsNullOrEmpty(separator))
+            return ToolResult.Error("Разделитель не может быть пустым.");
 
         string[]? columnNames = columns?.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
         int count = 0;
-        bool headerWritten = false;
 
-        using var writer = new StreamWriter(outputFile, false, Encoding.UTF8);
-        foreach (var row in TempFiles.ReadJsonl(inputFile))
+        using var writer = new StreamWriter(outputFile, false, new UTF8Encoding(true));
+        try
         {
-            columnNames ??= row.Keys.ToArray();
-
-            if (!headerWritten)
+            if (columnNames == null || columnNames.Length == 0)
             {
-                writer.WriteLine(string.Join(separator, columnNames));
-                headerWritten = true;
+                // Колонки — объединение ключей всех записей: ExtractFields/FilterObjects дают строки с разными наборами полей.
+                var keys = new List<string>();
+                var seen = new HashSet<string>();
+                foreach (var row in TempFiles.ReadJsonl(inputFile))
+                    foreach (var k in row.Keys)
+                        if (seen.Add(k)) keys.Add(k);
+                columnNames = keys.ToArray();
             }
 
-            var values = columnNames.Select(c =>
+            if (columnNames.Length > 0)
             {
-                if (row.TryGetValue(c, out var val))
+                writer.WriteLine(string.Join(separator, columnNames.Select(c => QueryHelpers.CsvEscape(c, separator))));
+                foreach (var row in TempFiles.ReadJsonl(inputFile))
                 {
-                    var s = val.ToString();
-                    if (s.Contains(separator) || s.Contains('"') || s.Contains('\n'))
-                        return $"\"{s.Replace("\"", "\"\"")}\"";
-                    return s;
+                    var values = columnNames.Select(c =>
+                        row.TryGetValue(c, out var val) ? QueryHelpers.CsvEscape(val.ToString(), separator) : "");
+                    writer.WriteLine(string.Join(separator, values));
+                    count++;
                 }
-                return "";
-            });
-            writer.WriteLine(string.Join(separator, values));
-            count++;
+            }
+        }
+        catch (JsonException ex)
+        {
+            writer.Dispose();
+            File.Delete(outputFile);
+            return ToolResult.Error($"Файл {inputFile} не является JSONL (одна JSON-запись на строку): {ex.Message}");
         }
 
         return ToolResult.Ok($"Экспортировано {count} записей в CSV: {outputFile}");

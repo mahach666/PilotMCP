@@ -27,13 +27,25 @@ public static class ToolLogger
         entry.AppendLine($"  Result: {resultPreview}");
         entry.AppendLine();
 
-        lock (Lock)
+        // Логирование — вспомогательная функция: сбой записи (общий файл у нескольких процессов,
+        // нет прав, диск) не должен превращать уже выполненный вызов инструмента в ошибку.
+        try
         {
-            File.AppendAllText(LogPath, entry.ToString(), Encoding.UTF8);
-        }
+            lock (Lock)
+            {
+                // FileShare.ReadWrite: лог общий для всех процессов PilotMCP.
+                using var fs = new FileStream(LogPath, FileMode.Append, FileAccess.Write, FileShare.ReadWrite);
+                var bytes = Encoding.UTF8.GetBytes(entry.ToString());
+                fs.Write(bytes, 0, bytes.Length);
+            }
 
-        // Also write to stderr for MCP client visibility
-        Console.Error.WriteLine($"[PilotMCP] {toolName}({args}) → {(result.Length > 200 ? result[..200] + "..." : result)}");
+            // Also write to stderr for MCP client visibility
+            Console.Error.WriteLine($"[PilotMCP] {toolName}({args}) → {(result.Length > 200 ? result[..200] + "..." : result)}");
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ObjectDisposedException)
+        {
+            Console.Error.WriteLine($"[PilotMCP] ToolLogger: не удалось записать лог ({ex.GetType().Name}: {ex.Message})");
+        }
     }
 
     public static void LogError(string toolName, string args, Exception ex)

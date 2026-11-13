@@ -144,9 +144,9 @@ public class MetadataAdminTools
             int newId = 0;
             var version = await _connection.UpdateMetadataViaAdminAsync(meta =>
             {
-                if (meta.Types.Any(t => t.Name == name))
+                if (meta.Types.Any(t => !t.IsDeleted && string.Equals(t.Name, name, StringComparison.OrdinalIgnoreCase)))
                     throw new InvalidOperationException($"Тип '{name}' уже существует.");
-                if (!Enum.TryParse<TypeKind>(kind, true, out var typeKind))
+                if (!TryParseEnum<TypeKind>(kind, out var typeKind))
                     throw new InvalidOperationException($"Неизвестный вид типа '{kind}'. Допустимо: {string.Join(", ", Enum.GetNames<TypeKind>())}.");
 
                 var parents = ResolveTypes(meta, parentTypeNames);
@@ -311,7 +311,7 @@ public class MetadataAdminTools
                 var type = ResolveType(meta, typeName);
                 if (type.Attributes.Any(a => a.Name == name))
                     throw new InvalidOperationException($"Атрибут '{name}' уже существует в типе '{typeName}'.");
-                if (!Enum.TryParse<MAttrType>(attrType, true, out var mAttrType))
+                if (!TryParseEnum<MAttrType>(attrType, out var mAttrType))
                     throw new InvalidOperationException($"Неизвестный тип атрибута '{attrType}'. Допустимо: {string.Join(", ", Enum.GetNames<MAttrType>())}.");
 
                 type.Attributes.Add(new MAttribute
@@ -407,7 +407,7 @@ public class MetadataAdminTools
             {
                 if (meta.UserStates.Any(s => s.Name == name))
                     throw new InvalidOperationException($"Состояние '{name}' уже существует.");
-                if (!Enum.TryParse<UserStateColors>(color, true, out var stateColor))
+                if (!TryParseEnum<UserStateColors>(color, out var stateColor))
                     throw new InvalidOperationException($"Неизвестный цвет '{color}'. Допустимо: {string.Join(", ", Enum.GetNames<UserStateColors>())}.");
 
                 meta.UserStates.Add(new MUserState
@@ -445,7 +445,7 @@ public class MetadataAdminTools
                 if (!string.IsNullOrEmpty(title)) { state.Title = title; changed.Add("title"); }
                 if (!string.IsNullOrEmpty(color))
                 {
-                    if (!Enum.TryParse<UserStateColors>(color, true, out var stateColor))
+                    if (!TryParseEnum<UserStateColors>(color, out var stateColor))
                         throw new InvalidOperationException($"Неизвестный цвет '{color}'. Допустимо: {string.Join(", ", Enum.GetNames<UserStateColors>())}.");
                     state.Color = stateColor;
                     changed.Add("color");
@@ -586,9 +586,13 @@ public class MetadataAdminTools
         throw new InvalidOperationException($"Некорректное значение {paramName}: '{value}' (ожидается true/false).");
     }
 
+    // Enum.TryParse принимает любое число ("99"); допускаем только объявленные имена и значения.
+    internal static bool TryParseEnum<T>(string text, out T value) where T : struct, Enum
+        => Enum.TryParse(text, true, out value) && Enum.IsDefined(value);
+
     private static MType ResolveType(DMetadata meta, string name)
     {
-        return meta.Types.FirstOrDefault(t => t.Name == name)
+        return meta.Types.FirstOrDefault(t => !t.IsDeleted && string.Equals(t.Name, name, StringComparison.OrdinalIgnoreCase))
             ?? throw new InvalidOperationException($"Тип '{name}' не найден.");
     }
 

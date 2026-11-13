@@ -10,6 +10,9 @@ public class SettingsTools
     private readonly PilotConnection _connection;
     public SettingsTools(PilotConnection connection) => _connection = connection;
 
+    private static string? Clip(string? value, int limit)
+        => value != null && value.Length > limit ? $"{value[..limit]}... (усечено, всего {value.Length} симв.)" : value;
+
     [McpServerTool, Description(
         "Получить персональные настройки текущего пользователя. " +
         "API не поддерживает чтение настроек другого пользователя. " +
@@ -19,6 +22,8 @@ public class SettingsTools
     {
         return ToolRunner.RunAsync(_connection, "GetPersonalSettings", $"key={key}", async () =>
         {
+            // Полный список режем коротко, а при запросе конкретного ключа показываем значение целиком (до 4000 символов).
+            var limit = string.IsNullOrEmpty(key) ? 200 : 4000;
             var settings = await _connection.ServerApi.GetPersonalSettingsAsync(string.IsNullOrEmpty(key) ? null! : key);
 
             var sb = new StringBuilder();
@@ -30,7 +35,7 @@ public class SettingsTools
                     sb.AppendLine($"  [{kv.Key}]:");
                     if (kv.Value?.Values != null)
                         foreach (var inner in kv.Value.Values)
-                            sb.AppendLine($"    {inner.Key} = {(inner.Value?.Length > 200 ? inner.Value[..200] + "..." : inner.Value)}");
+                            sb.AppendLine($"    {inner.Key} = {Clip(inner.Value, limit)}");
                 }
             }
             if (settings?.CommonSettings != null)
@@ -41,7 +46,7 @@ public class SettingsTools
                     sb.AppendLine($"  [{kv.Key}]:");
                     if (kv.Value?.Values != null)
                         foreach (var inner in kv.Value.Values)
-                            sb.AppendLine($"    {inner.Key} = {(inner.Value?.Length > 200 ? inner.Value[..200] + "..." : inner.Value)}");
+                            sb.AppendLine($"    {inner.Key} = {Clip(inner.Value, limit)}");
                 }
             }
 
@@ -66,7 +71,7 @@ public class SettingsTools
                     sb.AppendLine($"  [{kv.Key}]:");
                     if (kv.Value?.Values != null)
                         foreach (var inner in kv.Value.Values)
-                            sb.AppendLine($"    {inner.Key} = {(inner.Value?.Length > 200 ? inner.Value[..200] + "..." : inner.Value)}");
+                            sb.AppendLine($"    {inner.Key} = {Clip(inner.Value, 200)}");
                 }
             }
 
@@ -84,6 +89,7 @@ public class CommandTools
     [McpServerTool, Description(
         "Вызвать команду, зарегистрированную серверным расширением Pilot Server (плагином на стороне сервера). " +
         "Работает ТОЛЬКО с командами расширений, имя которых известно заранее. " +
+        "Ждёт ответ сервера до 15 с и возвращает результат (или ошибку) команды; если ответа нет — сообщает об этом. " +
         "НЕ вызывает MCP-инструменты, методы SDK или внутренние функции — если нужного действия нет в списке инструментов, " +
         "InvokeCommand его не заменит, и подбирать имена команд бесполезно.")]
     public Task<string> InvokeCommand(
@@ -105,9 +111,10 @@ public class CommandTools
             }
 
             var requestId = Guid.NewGuid();
+            (bool Success, byte[] Data)? outcome;
             try
             {
-                await _connection.ServerApi.InvokeCommandAsync(commandName, requestId, bytes);
+                outcome = await _connection.InvokeCommandAsync(commandName, requestId, bytes);
             }
             catch (Exception ex) when (ex.Message.Contains("handler is not registered"))
             {
@@ -117,7 +124,30 @@ public class CommandTools
                     "если команда не зарегистрирована, её не существует. Используйте инструменты из списка MCP.");
             }
 
-            return ToolResult.Ok($"Команда '{commandName}' отправлена. RequestId: {requestId}");
+            if (outcome is not { } res)
+                return ToolResult.Ok(
+                    $"Команда '{commandName}' отправлена, но результат от сервера не получен за 15 с. RequestId: {requestId}");
+
+            var text = FormatCommandData(res.Data);
+            return res.Success
+                ? ToolResult.Ok($"Команда '{commandName}' выполнена. RequestId: {requestId}" + (text.Length > 0 ? $"{Environment.NewLine}Результат: {text}" : ""))
+                : ToolResult.Error($"Команда '{commandName}' завершилась ошибкой. RequestId: {requestId}" + (text.Length > 0 ? $"{Environment.NewLine}{text}" : ""));
         });
+    }
+
+    // Данные ответа команды: UTF-8 текст, если это валидный текст, иначе base64.
+    private static string FormatCommandData(byte[] data)
+    {
+        if (data == null || data.Length == 0) return "";
+        string text;
+        try
+        {
+            text = new System.Text.UTF8Encoding(false, true).GetString(data);
+        }
+        catch (System.Text.DecoderFallbackException)
+        {
+            text = "base64: " + Convert.ToBase64String(data);
+        }
+        return Helpers.Truncate(text, 2000);
     }
 }

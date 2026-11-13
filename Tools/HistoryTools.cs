@@ -57,23 +57,33 @@ public class HistoryTools
         });
     }
 
+    private const long MaxChangesetRange = 1000;
+
     [McpServerTool, Description(
-        "Получить набор изменений (changesets) за период. Показывает все изменения в базе.")]
+        "Получить набор изменений (changesets) за период: номер, идентификатор, число изменённых объектов и их GUID. " +
+        "Диапазон не более 1000 номеров (last-first < 1000).")]
     public Task<string> GetChangesets(
         [Description("Номер первого changeset")] long first,
         [Description("Номер последнего changeset")] long last)
     {
         return ToolRunner.RunAsync(_connection, "GetChangesets", $"first={first}, last={last}", async () =>
         {
+            if (first < 0 || last < first)
+                return ToolResult.Error("Некорректный диапазон: нужно 0 <= first <= last.");
+            if (last - first >= MaxChangesetRange)
+                return ToolResult.Error($"Диапазон слишком большой: не более {MaxChangesetRange} номеров.");
+
             var changesets = await _connection.ServerApi.GetChangesetsAsync(first, last);
 
             var (path, count) = TempFiles.WriteJsonl(changesets, cs => new Dictionary<string, object>
             {
-                ["id"] = cs.Identity.ToString(),
-                ["changed"] = cs.Changed?.Count ?? 0
+                ["id"] = cs.Id,
+                ["identity"] = cs.Identity.ToString(),
+                ["changed"] = cs.Changed?.Count ?? 0,
+                ["changedIds"] = cs.Changed?.Select(g => g.ToString()).ToArray() ?? Array.Empty<string>()
             }, "changesets");
 
-            return ToolResult.File(path, count, new[] { "id", "changed" },
+            return ToolResult.File(path, count, new[] { "id", "identity", "changed", "changedIds" },
                 $"Получено {count} changesets ({first}..{last})");
         });
     }

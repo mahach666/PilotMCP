@@ -1,11 +1,16 @@
+using Ascon.Pilot.Transport;
+using System.Diagnostics.CodeAnalysis;
 using System.Reflection;
+using System.Runtime.ExceptionServices;
 
 namespace PilotMCP;
 
 /// <summary>
 /// DispatchProxy-обёртка для API-интерфейсов Pilot.
 /// При ошибке соединения (Transport closed, disposed и т.д.) автоматически
-/// переподключается и повторяет вызов.
+/// переподключается. Вызов повторяется только если это безопасно: метод читающий
+/// (Get*/Load*/Calc*/Open*...) либо цель уже была disposed (запрос не уходил на сервер).
+/// Записи после таймаута/обрыва не повторяются — сервер мог уже применить изменение.
 /// Поддерживает как sync, так и async (Task-returning) методы.
 /// </summary>
 public class ReconnectingProxy<T> : DispatchProxy where T : class
@@ -36,17 +41,13 @@ public class ReconnectingProxy<T> : DispatchProxy where T : class
 
         try
         {
-            var result = targetMethod.Invoke(_target, args);
+            var result = InvokeTarget(targetMethod, args);
 
             // Для async методов (возвращающих Task) — перехватываем ошибку внутри Task
             if (result is Task task)
                 return WrapTask(task, targetMethod, args);
 
             return result;
-        }
-        catch (TargetInvocationException tie) when (IsRecoverable(tie.InnerException))
-        {
-            return Retry(targetMethod, args, tie.InnerException!);
         }
         catch (Exception ex) when (IsRecoverable(ex))
         {
@@ -85,7 +86,8 @@ public class ReconnectingProxy<T> : DispatchProxy where T : class
         catch (Exception ex) when (IsRecoverable(ex))
         {
             Restore(method.Name, ex.GetType().Name);
-            var retryResult = method.Invoke(_target, args);
+            if (!CanReplay(method, ex)) throw;
+            var retryResult = InvokeTarget(method, args);
             if (retryResult is Task retryTask)
                 await retryTask;
         }
@@ -100,7 +102,8 @@ public class ReconnectingProxy<T> : DispatchProxy where T : class
         catch (Exception ex) when (IsRecoverable(ex))
         {
             Restore(method.Name, ex.GetType().Name);
-            var retryResult = method.Invoke(_target, args);
+            if (!CanReplay(method, ex)) throw;
+            var retryResult = InvokeTarget(method, args);
             if (retryResult is Task<TResult> retryTask)
                 return await retryTask;
             throw;
@@ -123,14 +126,41 @@ public class ReconnectingProxy<T> : DispatchProxy where T : class
     private object? Retry(MethodInfo method, object?[]? args, Exception original)
     {
         Restore(method.Name, original.GetType().Name);
+        if (!CanReplay(method, original)) Rethrow(original);
+        return InvokeTarget(method, args);
+    }
+
+    /// <summary>Вызов метода target с разворачиванием TargetInvocationException — наружу идёт настоящая ошибка сервера.</summary>
+    private object? InvokeTarget(MethodInfo method, object?[]? args)
+    {
         try
         {
             return method.Invoke(_target, args);
         }
-        catch (TargetInvocationException tie)
+        catch (TargetInvocationException tie) when (tie.InnerException != null)
         {
-            throw tie.InnerException ?? tie;
+            Rethrow(tie.InnerException);
+            return null;
         }
+    }
+
+    [DoesNotReturn]
+    private static void Rethrow(Exception ex) => ExceptionDispatchInfo.Capture(ex).Throw();
+
+    private static readonly string[] ReadOnlyPrefixes = { "Get", "Load", "Calc", "Open", "Check", "Enumerate", "SearchMessages" };
+
+    /// <summary>
+    /// Можно ли безопасно повторить вызов после reconnect: читающие методы — всегда;
+    /// остальные — только если цель была disposed (запрос на сервер не уходил).
+    /// После таймаута/обрыва записи (ChangeAsync, SendMessage, InvokeCommand...) сервер мог уже
+    /// выполнить вызов, повтор дал бы дубликат.
+    /// </summary>
+    private static bool CanReplay(MethodInfo method, Exception ex)
+    {
+        if (ReadOnlyPrefixes.Any(p => method.Name.StartsWith(p, StringComparison.Ordinal))) return true;
+        for (var e = ex; e != null; e = e.InnerException)
+            if (e is ObjectDisposedException) return true;
+        return false;
     }
 
     /// <summary>
@@ -143,13 +173,12 @@ public class ReconnectingProxy<T> : DispatchProxy where T : class
     {
         if (ex == null) return false;
         if (ex is ObjectDisposedException) return true;
-        if (ex is TimeoutException) return true;
+        if (ex is TimeoutException or TransportException) return true;
         var msg = ex.Message;
         if (msg != null && (
             msg.Contains("disposed", StringComparison.OrdinalIgnoreCase) ||
             msg.Contains("Transport closed", StringComparison.OrdinalIgnoreCase) ||
-            msg.Contains("TransportClient", StringComparison.OrdinalIgnoreCase) ||
-            msg.Contains("transport", StringComparison.OrdinalIgnoreCase)))
+            msg.Contains("TransportClient", StringComparison.OrdinalIgnoreCase)))
             return true;
         if (ex.InnerException != null) return IsRecoverable(ex.InnerException);
         return false;

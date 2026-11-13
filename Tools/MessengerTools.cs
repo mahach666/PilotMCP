@@ -58,11 +58,12 @@ public class MessengerTools
     }
 
     [McpServerTool, Description(
-        "Прочитать сообщения из чата. Поддерживает пагинацию через skip/count.")]
+        "Прочитать сообщения из чата (от старых к новым внутри страницы). Пагинация: skip=0 — самые новые count сообщений, " +
+        "skip=count — предыдущая страница и т.д. Правки сообщений подставляются в текст с пометкой (ред.), реакции и markdown помечаются.")]
     public Task<string> GetMessages(
         [Description("GUID чата")] string chatId,
         [Description("Количество сообщений (по умолчанию 30)")] int count = 30,
-        [Description("Пропустить первых N сообщений (для пагинации)")] int skip = 0,
+        [Description("Пропустить N самых новых сообщений (для пагинации назад по истории)")] int skip = 0,
         [Description("Макс. длина текста одного сообщения (0 = без лимита)")] int maxMessageLength = 500)
     {
         return ToolRunner.RunAsync(_connection, "GetMessages", $"chat={chatId}, count={count}, skip={skip}", async () =>
@@ -71,35 +72,45 @@ public class MessengerTools
             if (!Guid.TryParse(chatId, out var guid))
                 return ToolResult.Error($"Некорректный GUID: {chatId}");
 
+            if (count <= 0 || skip < 0)
+                return ToolResult.Error("count должен быть > 0, skip >= 0.");
+
             var api = _connection.MessagesApi!;
 
             List<DMessage> page;
-            int total;
+            bool hasMore;
             try
             {
                 var fromDate = new DateTime(2000, 1, 1, 0, 0, 0, DateTimeKind.Utc);
-                var (messages, totalCount) = api.GetMessages(guid, fromDate, DateTime.UtcNow, skip + count);
-                total = totalCount;
+                // total сервер всегда возвращает 0: берём на одно сообщение больше, чтобы знать, есть ли продолжение
+                var (messages, _) = api.GetMessages(guid, fromDate, DateTime.UtcNow, skip + count + 1);
+                hasMore = messages.Count > skip + count;
                 page = messages
-                    .OrderBy(m => m.GetActualDateTime())
+                    .OrderByDescending(m => m.GetActualDateTime())
                     .Skip(skip)
                     .Take(count)
+                    .Reverse()
                     .ToList();
+            }
+            catch (Exception getEx) when (getEx is PilotSecurityAccessDeniedException or PilotServerNotFoundException)
+            {
+                ToolLogger.LogError("GetMessages.api", $"chat={chatId}", getEx);
+                return ToolResult.Error($"Чат недоступен: {getEx.Message}");
             }
             catch (Exception getEx)
             {
                 ToolLogger.LogError("GetMessages.api", $"chat={chatId}", getEx);
-                return await GetMessagesFallback(guid, count, skip, maxMessageLength);
+                return await GetMessagesFallback(guid, count, skip, maxMessageLength, getEx);
             }
 
             if (page.Count == 0)
-                return ToolResult.Ok($"Сообщений не найдено (всего в чате: {total}).");
+                return ToolResult.Ok("Сообщений не найдено.");
 
             var people = await _connection.ServerApi.LoadPeopleAsync();
             var personMap = people.ToDictionary(p => p.Id, p => p.DisplayName ?? p.Login ?? $"#{p.Id}");
 
             var sb = new StringBuilder();
-            sb.AppendLine($"Сообщения чата ({page.Count} из {total}, skip={skip}):");
+            sb.AppendLine($"Сообщения чата ({page.Count}, skip={skip}):");
             foreach (var msg in page)
             {
                 var who = personMap.GetValueOrDefault(msg.CreatorId, $"#{msg.CreatorId}");
@@ -108,8 +119,8 @@ public class MessengerTools
                     msgText = Helpers.Truncate(msgText, maxMessageLength);
                 sb.AppendLine($"  [{msg.GetActualDateTime():MM-dd HH:mm}] (id:{msg.Id}) {who}: {msgText}");
             }
-            if (skip + page.Count < total)
-                sb.AppendLine($"  ... ещё {total - skip - page.Count} сообщений (используйте skip={skip + page.Count})");
+            if (hasMore)
+                sb.AppendLine($"  ... есть более ранние сообщения (используйте skip={skip + page.Count})");
 
             return ToolResult.Ok(sb.ToString());
         });
@@ -118,7 +129,7 @@ public class MessengerTools
     /// <summary>
     /// Fallback: когда GetMessages падает на сервере, получаем сообщения через GetMessage по одному.
     /// </summary>
-    private async Task<string> GetMessagesFallback(Guid chatId, int count, int skip, int maxMessageLength)
+    private async Task<string> GetMessagesFallback(Guid chatId, int count, int skip, int maxMessageLength, Exception getEx)
     {
         var api = _connection.MessagesApi!;
 
@@ -141,12 +152,11 @@ public class MessengerTools
                 foreach (var id in searchResult.Found)
                     if (!messageIds.Contains(id)) messageIds.Add(id);
         }
-        catch { /* SearchMessages тоже может упасть */ }
+        catch (Exception searchEx) { ToolLogger.LogError("GetMessages.fallback.search", $"chat={chatId}", searchEx); }
 
         if (messageIds.Count == 0)
             return ToolResult.Error(
-                $"GetMessages упал с ошибкой на сервере и fallback не нашёл ID сообщений. " +
-                $"Это баг сервера Pilot для данного чата.");
+                $"GetMessages завершился ошибкой ({getEx.Message}), fallback не нашёл ID сообщений.");
 
         var people = await _connection.ServerApi.LoadPeopleAsync();
         var personMap = people.ToDictionary(p => p.Id, p => p.DisplayName ?? p.Login ?? $"#{p.Id}");
@@ -163,7 +173,7 @@ public class MessengerTools
                 if (maxMessageLength > 0) text = Helpers.Truncate(text, maxMessageLength);
                 messages.Add((msg.Id, msg.GetActualDateTime(), who, text, msg.Type.ToString()));
             }
-            catch { /* пропускаем битые сообщения */ }
+            catch (Exception msgEx) { ToolLogger.LogError("GetMessages.fallback.message", $"msg={msgId}", msgEx); }
         }
 
         var page = messages.OrderByDescending(m => m.date).Skip(skip).Take(count).Reverse().ToList();
@@ -176,29 +186,7 @@ public class MessengerTools
         return ToolResult.Ok(sb.ToString());
     }
 
-    /// <summary>
-    /// Безопасное извлечение текста из сообщения.
-    /// </summary>
-    private static string SafeGetText(INMessage msg)
-    {
-        if (msg.Data == null || msg.Data.Length == 0)
-            return $"[{msg.Type}]";
-
-        if (msg.Type is MessageType.TextMessage or MessageType.EditTextMessage or MessageType.MessageAnswer)
-        {
-            try
-            {
-                var textData = msg.GetMessageData<DTextMessageData>();
-                return textData?.Text ?? "";
-            }
-            catch
-            {
-                return $"[ошибка чтения текста, {msg.Data.Length} bytes]";
-            }
-        }
-
-        return $"[{msg.Type}]";
-    }
+    private static string SafeGetText(INMessage msg) => MessageHelpers.FormatText(msg);
 
     [McpServerTool, Description(
         "Отправить сообщение в чат.")]
@@ -351,6 +339,8 @@ public class MessengerTools
 
             var info = _connection.MessagesApi!.GetChat(guid);
             var chat = info.Chat;
+            if (chat == null || chat.Id == Guid.Empty)
+                return ToolResult.Error($"Чат {chatId} не найден.");
             var sb = new StringBuilder();
             sb.AppendLine($"Чат: {chat.Name ?? "Без названия"}");
             sb.AppendLine($"  ID: {chat.Id}");
@@ -373,7 +363,7 @@ public class MessengerTools
     }
 
     [McpServerTool, Description(
-        "Получить личный чат с конкретным пользователем (создаётся автоматически при первом обращении).")]
+        "Получить личный чат с конкретным пользователем (если он уже существует; сам инструмент чат не создаёт).")]
     public string GetPersonalChat(
         [Description("ID пользователя (personId)")] int personId)
     {
@@ -382,6 +372,8 @@ public class MessengerTools
             EnsureMessagesApi();
             var info = _connection.MessagesApi!.GetPersonalChat(personId);
             var chat = info.Chat;
+            if (chat == null || chat.Id == Guid.Empty)
+                return ToolResult.Error($"Личного чата с #{personId} ещё нет.");
             var sb = new StringBuilder();
             sb.AppendLine($"Личный чат с #{personId}:");
             sb.AppendLine($"  ChatId: {chat.Id}");
@@ -461,7 +453,7 @@ public class MessengerTools
     }
 
     [McpServerTool, Description(
-        "Поиск сообщений по тексту в указанных чатах (или во всех).")]
+        "Поиск сообщений по тексту в указанных чатах (если chatIds пуст — во всех чатах текущего пользователя).")]
     public string SearchMessages(
         [Description("Строка поиска")] string query,
         [Description("GUID чатов через запятую (если пусто — поиск по всем)")] string chatIds = "",
@@ -470,11 +462,23 @@ public class MessengerTools
         return ToolRunner.Run(_connection, "SearchMessages", $"query={query}, chats={chatIds}", () =>
         {
             EnsureMessagesApi();
-            var chatGuids = new List<Guid>();
-            if (!string.IsNullOrEmpty(chatIds))
+            if (string.IsNullOrWhiteSpace(query))
+                return ToolResult.Error("Строка поиска не может быть пустой.");
+            if (maxResults <= 0)
+                return ToolResult.Error("maxResults должен быть > 0.");
+            if (!MessageHelpers.TryParseGuids(chatIds, out var chatGuids, out var badGuid))
+                return ToolResult.Error($"Некорректный GUID чата: {badGuid}");
+
+            var api = _connection.MessagesApi!;
+            if (chatGuids.Count == 0)
             {
-                foreach (var s in chatIds.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries))
-                    if (Guid.TryParse(s, out var g)) chatGuids.Add(g);
+                // сервер падает на пустом ChatIds — перечисляем чаты пользователя сами
+                var from = new DateTime(2000, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+                api.Open(100, from);
+                chatGuids = api.GetChats(_connection.CurrentPersonId, from, DateTime.UtcNow, 2000, false)
+                    .Select(c => c.Chat.Id).ToList();
+                if (chatGuids.Count == 0)
+                    return ToolResult.Ok("У пользователя нет чатов, искать негде.");
             }
 
             var request = new DMessageSearchRequest
@@ -482,7 +486,7 @@ public class MessengerTools
                 SearchString = query,
                 MaxResults = maxResults
             };
-            if (chatGuids.Any()) request.ChatIds.AddRange(chatGuids);
+            request.ChatIds.AddRange(chatGuids);
             var searchDef = new DMessageSearchDefinition
             {
                 Id = Guid.NewGuid(),
@@ -495,8 +499,8 @@ public class MessengerTools
                 return ToolResult.Ok($"По запросу \"{query}\" ничего не найдено.");
 
             var sb = new StringBuilder();
-            sb.AppendLine($"Результаты поиска \"{query}\" ({searchResult.Found.Count} из {searchResult.TotalResults}):");
-            foreach (var msgId in searchResult.Found.Take(30))
+            sb.AppendLine($"Результаты поиска \"{query}\" (показано {searchResult.Found.Count}, всего найдено {searchResult.TotalResults}):");
+            foreach (var msgId in searchResult.Found)
             {
                 try
                 {
@@ -506,7 +510,11 @@ public class MessengerTools
                     var preview = text.Length > 100 ? text[..100] + "..." : text;
                     sb.AppendLine($"  [{msg.GetActualDateTime():MM-dd HH:mm}] #{msg.CreatorId} в {msg.ChatId}: {preview}");
                 }
-                catch { sb.AppendLine($"  [ошибка чтения сообщения {msgId}]"); }
+                catch (Exception msgEx)
+                {
+                    ToolLogger.LogError("SearchMessages.message", $"msg={msgId}", msgEx);
+                    sb.AppendLine($"  [ошибка чтения сообщения {msgId}: {msgEx.Message}]");
+                }
             }
 
             return ToolResult.Ok(sb.ToString());

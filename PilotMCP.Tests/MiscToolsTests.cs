@@ -73,6 +73,18 @@ public class MiscToolsTests
         result.AssertOk();
     }
 
+    [Fact]
+    public async Task GetChangesets_TooWideRange_ReturnsError()
+    {
+        var result = await _client.CallToolAsync("GetChangesets", new JsonObject
+        {
+            ["first"] = 1,
+            ["last"] = 100000
+        });
+
+        result.AssertError();
+    }
+
     // ── PeopleTools ──
 
     [Fact]

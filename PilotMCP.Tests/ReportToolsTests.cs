@@ -110,4 +110,16 @@ public class ReportToolsTests
 
         result.AssertError();
     }
+
+    [Fact]
+    public async Task GetReportSample_WithPathSegments_ReturnsError()
+    {
+        var result = await _client.CallToolAsync("GetReportSample", new JsonObject
+        {
+            ["sampleName"] = "../../secret"
+        });
+
+        result.AssertError();
+        Assert.Contains("путь", result.Message);
+    }
 }

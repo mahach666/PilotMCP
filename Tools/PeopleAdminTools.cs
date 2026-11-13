@@ -157,7 +157,7 @@ public class PeopleAdminTools
             _connection.EnsureConnected();
             var createdId = await _connection.WithAdminApiAsync(async admin =>
             {
-                if (!Enum.TryParse<OrgUnitKind>(kind, true, out var unitKind))
+                if (!MetadataAdminTools.TryParseEnum<OrgUnitKind>(kind, out var unitKind))
                     throw new InvalidOperationException($"Неизвестный вид оргединицы '{kind}'. Допустимо: {string.Join(", ", Enum.GetNames<OrgUnitKind>())}.");
 
                 var units = await admin.LoadOrganisationUnitsAsync(_connection.DatabaseName);
@@ -337,7 +337,7 @@ public class PeopleAdminTools
 
     // ===== Вспомогательные =====
 
-    private static bool ParseBool(string value, string paramName)
+    internal static bool ParseBool(string value, string paramName)
     {
         if (value.Equals("true", StringComparison.OrdinalIgnoreCase)) return true;
         if (value.Equals("false", StringComparison.OrdinalIgnoreCase)) return false;

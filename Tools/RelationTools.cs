@@ -10,10 +10,24 @@ public class RelationTools
     private readonly PilotConnection _connection;
     public RelationTools(PilotConnection connection) => _connection = connection;
 
+    private const string AllowedTypes =
+        "SourceFiles, TaskInitiatorAttachments, TaskExecutorAttachments, MessageAttachments, Custom, TaskAttachments";
+
+    // Enum.TryParse принимает и числа ("99"), и служебный Publish — оставляем только перечисленные в описании типы.
+    internal static bool TryParseLinkType(string value, out RelationType type)
+    {
+        type = default;
+        return Enum.TryParse(value, ignoreCase: true, out type)
+               && Enum.IsDefined(type)
+               && type != RelationType.Publish
+               && !int.TryParse(value, out _);
+    }
+
     [McpServerTool, Description(
         "Создать двустороннюю связь между двумя объектами Pilot. " +
         "Типы связей: SourceFiles, TaskInitiatorAttachments, TaskExecutorAttachments, MessageAttachments, Custom, TaskAttachments. " +
-        "Используйте Custom для произвольных связей. name — необязательное имя связи.")]
+        "Используйте Custom для произвольных связей. name — необязательное имя связи. " +
+        "Если такая связь (тот же объект, тип и имя) уже есть — ничего не создаётся.")]
     public Task<string> CreateLink(
         [Description("GUID первого объекта")] string objectId1,
         [Description("GUID второго объекта")] string objectId2,
@@ -27,16 +41,26 @@ public class RelationTools
                 return ToolResult.Error("Некорректный GUID первого объекта.");
             if (!Guid.TryParse(objectId2, out var guid2))
                 return ToolResult.Error("Некорректный GUID второго объекта.");
-            if (!Enum.TryParse<RelationType>(relationType, ignoreCase: true, out var relType))
-                return ToolResult.Error($"Неизвестный тип связи: {relationType}.");
+            if (!TryParseLinkType(relationType, out var relType))
+                return ToolResult.Error($"Неизвестный тип связи: {relationType}. Допустимые: {AllowedTypes}.");
+
+            // AddRelation не проверяет дубликаты (каждый вызов создаёт связь с новым Id), поэтому проверяем сами.
+            var existing = await _connection.ServerApi.GetObjectsAsync(new[] { guid1, guid2 });
+            var first = existing?.FirstOrDefault(o => o.Id == guid1);
+            if (first == null)
+                return ToolResult.Error($"Объект {objectId1} не найден.");
+            if (existing!.All(o => o.Id != guid2))
+                return ToolResult.Error($"Объект {objectId2} не найден.");
+            if (first.Relations.Any(r => r.TargetId == guid2 && r.Type == relType && (r.Name ?? "") == (name ?? "")))
+                return ToolResult.Ok($"Связь уже существует: {objectId1} <-> {objectId2}, тип: {relType}. Ничего не создано.");
 
             var modifier = _connection.CreateModifier();
             modifier.AddRelation(guid1, guid2, relType, name ?? "");
 
             if (!modifier.AnyChanges())
-                return ToolResult.Error("Нет изменений для применения. Возможно, связь уже существует.");
+                return ToolResult.Error("Нет изменений для применения.");
 
-            var changesetId = modifier.Apply(null);
+            var changesetId = _connection.ApplyAndWait(() => modifier.Apply(null));
 
             var objects = await _connection.ServerApi.GetObjectsAsync(new[] { guid1 });
             if (objects != null && objects.Count > 0)
@@ -98,22 +122,26 @@ public class RelationTools
             if (!modifier.AnyChanges())
                 return ToolResult.Error("Нет изменений для применения.");
 
-            var changesetId = modifier.Apply(null);
+            var changesetId = _connection.ApplyAndWait(() => modifier.Apply(null));
             return ToolResult.Ok($"Удалено связей: {relations.Count} (между {sourceId} и {targetId}). Changeset: {changesetId}");
         });
     }
 
+    private const int MaxAccessEntries = 20;
+
     [McpServerTool, Description(
-        "Получить объекты с правами доступа. Возвращает объекты с полной информацией о правах.")]
+        "Получить объекты с правами доступа. Для каждого объекта выводятся: уровень (level) — уровень доступа, который сервер вернул для текущего пользователя, " +
+        "и записи прав в виде #orgUnitId:уровень (первые 20, остальные — счётчиком). Некорректный GUID в списке — ошибка.")]
     public Task<string> GetObjectsWithRights(
         [Description("GUID объектов через запятую")] string objectIds)
     {
         return ToolRunner.RunAsync(_connection, "GetObjectsWithRights", objectIds, async () =>
         {
-            var guids = objectIds.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries)
-                .Select(id => Guid.TryParse(id, out var g) ? g : Guid.Empty)
-                .Where(g => g != Guid.Empty)
-                .ToArray();
+            var parts = objectIds.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
+            var invalid = parts.Where(id => !Guid.TryParse(id, out var g) || g == Guid.Empty).ToList();
+            if (invalid.Count > 0)
+                return ToolResult.Error($"Некорректные GUID: {string.Join(", ", invalid)}.");
+            var guids = parts.Select(Guid.Parse).ToArray();
 
             if (guids.Length == 0)
                 return ToolResult.Error("Не указаны корректные GUID.");
@@ -124,7 +152,8 @@ public class RelationTools
             foreach (var (obj, level, subtypes) in results)
             {
                 var displayName = Helpers.GetDisplayName(obj, _connection.Metadata);
-                sb.AppendLine($"  - {obj.Id}: {displayName}, уровень: {level}, доступ: [{string.Join(", ", obj.Access.Select(a => $"#{a.OrgUnitId}:{a.Access.AccessLevel}"))}]");
+                sb.AppendLine($"  - {obj.Id}: {displayName}, уровень: {level}, доступ: [{string.Join(", ", obj.Access.Take(MaxAccessEntries).Select(a => $"#{a.OrgUnitId}:{a.Access.AccessLevel}"))}]" +
+                              (obj.Access.Count > MaxAccessEntries ? $" ... и ещё {obj.Access.Count - MaxAccessEntries} записей" : ""));
             }
 
             return ToolResult.Ok(sb.ToString());

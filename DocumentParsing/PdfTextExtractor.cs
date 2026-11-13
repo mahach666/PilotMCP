@@ -64,6 +64,9 @@ public static class PdfTextExtractor
     /// </summary>
     public static List<XpsTextExtractor.TextBlock> FindText(string pdfPath, string searchText)
     {
+        if (string.IsNullOrEmpty(searchText))
+            throw new ArgumentException("Текст для поиска не может быть пустым.", nameof(searchText));
+
         var found = new List<XpsTextExtractor.TextBlock>();
 
         using var document = PdfDocument.Open(pdfPath);
@@ -87,6 +90,11 @@ public static class PdfTextExtractor
 
                 // Собираем текст строки и индексы букв
                 var lineText = string.Join("", sortedLetters.Select(l => l.Value));
+                // Value буквы может быть длиннее одного символа (лигатура "fi", суррогатная пара):
+                // индекс символа строки -> индекс буквы
+                var charToLetter = new List<int>(lineText.Length);
+                for (int li = 0; li < sortedLetters.Count; li++)
+                    charToLetter.AddRange(Enumerable.Repeat(li, sortedLetters[li].Value.Length));
 
                 // Ищем все вхождения в строке
                 int startIdx = 0;
@@ -96,9 +104,8 @@ public static class PdfTextExtractor
                     if (idx < 0) break;
 
                     // Вычисляем координаты из позиций букв
-                    var firstLetter = sortedLetters[idx];
-                    var lastLetterIdx = Math.Min(idx + searchText.Length - 1, sortedLetters.Count - 1);
-                    var lastLetter = sortedLetters[lastLetterIdx];
+                    var firstLetter = sortedLetters[charToLetter[idx]];
+                    var lastLetter = sortedLetters[charToLetter[idx + searchText.Length - 1]];
 
                     var x = firstLetter.Location.X;
                     var matchWidth = (lastLetter.Location.X + lastLetter.Width) - firstLetter.Location.X;

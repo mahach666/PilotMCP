@@ -36,6 +36,33 @@ public class DocumentToolsTests
     }
 
     [Fact]
+    public async Task FindTextOnPage_WithEmptyText_ReturnsError()
+    {
+        var result = await _client.CallToolAsync("FindTextOnPage", new JsonObject
+        {
+            ["documentId"] = Guid.NewGuid().ToString(),
+            ["searchText"] = ""
+        });
+
+        result.AssertError();
+        Assert.Contains("пустым", result.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(10000)]
+    public async Task GetDocumentPageImage_WithDpiOutOfRange_ReturnsError(int dpi)
+    {
+        var result = await _client.CallToolAsync("GetDocumentPageImage", new JsonObject
+        {
+            ["documentId"] = Guid.NewGuid().ToString(),
+            ["dpi"] = dpi
+        });
+
+        Assert.Contains("dpi должен быть", result.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public async Task GetDocumentPageImage_WithInvalidId_ReturnsError()
     {
         var fakeId = Guid.NewGuid().ToString();

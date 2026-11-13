@@ -66,6 +66,41 @@ public class XpsPageOrderTests : IDisposable
     }
 
     [Fact]
+    public void GetPageSizes_ZipBombPage_ThrowsInsteadOfExhaustingMemory()
+    {
+        WriteXps(
+            ("_rels/.rels", Rels),
+            ("FixedDocSeq.fdseq", Seq),
+            ("Documents/1/FixedDoc.fdoc",
+                "<FixedDocument xmlns=\"http://schemas.microsoft.com/xps/2005/06\"><PageContent Source=\"Pages/1.fpage\" /></FixedDocument>"));
+        using (var zip = ZipFile.Open(_path, ZipArchiveMode.Update))
+        using (var s = zip.CreateEntry("Documents/1/Pages/1.fpage", CompressionLevel.Optimal).Open())
+        {
+            // ~65 МБ пробелов сжимаются в десятки КБ: часть больше лимита 64 МБ после распаковки
+            var chunk = new byte[1 << 20];
+            Array.Fill(chunk, (byte)' ');
+            for (var i = 0; i < 65; i++) s.Write(chunk);
+        }
+
+        var ex = Assert.Throws<InvalidDataException>(() => XpsTextExtractor.GetPageSizes(_path));
+        Assert.Contains("превышает допустимый размер", ex.Message);
+    }
+
+    [Fact]
+    public void GetPageSizes_TooManyPageReferences_Throws()
+    {
+        var refs = string.Concat(Enumerable.Repeat("<PageContent Source=\"Pages/1.fpage\" />", 10_001));
+        WriteXps(
+            ("_rels/.rels", Rels),
+            ("FixedDocSeq.fdseq", Seq),
+            ("Documents/1/FixedDoc.fdoc", $"<FixedDocument xmlns=\"http://schemas.microsoft.com/xps/2005/06\">{refs}</FixedDocument>"),
+            ("Documents/1/Pages/1.fpage", Page(100, 100)));
+
+        var ex = Assert.Throws<InvalidDataException>(() => XpsTextExtractor.GetPageSizes(_path));
+        Assert.Contains("страниц", ex.Message);
+    }
+
+    [Fact]
     public void GetPageSizes_MissingSize_Throws()
     {
         WriteXps(

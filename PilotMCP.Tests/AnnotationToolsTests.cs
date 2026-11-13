@@ -8,6 +8,7 @@ namespace PilotMCP.Tests;
 /// Тестовый документ ищется через инструменты: первый документ с .xps-файлом и словом на странице 0.
 /// </summary>
 [Collection("Pilot")]
+[Trait("Category", "Integration")]
 public class AnnotationToolsTests
 {
     private readonly McpTestClient _client;

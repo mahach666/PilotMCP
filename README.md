@@ -7,6 +7,31 @@ MCP-сервер для работы с Pilot через Server API. Позво�
 - .NET 8.0
 - Доступ к серверу Pilot
 
+## Установка
+
+Готовые сборки (Windows x64) — на странице [Releases](https://github.com/mahach666/PilotMCP/releases):
+
+| Файл | Для чего |
+| ---- | -------- |
+| `PilotMCP-vX.Y.Z-win-x64.mcpb` | MCP Bundle: установка в Claude Desktop в один клик, параметры подключения вводятся в форме |
+| `PilotMCP-vX.Y.Z-win-x64-selfcontained.zip` | Распаковать и указать `PilotMCP.exe` в конфигурации клиента; .NET не нужен |
+| `PilotMCP-vX.Y.Z-win-x64.zip` | То же, но нужен установленный .NET 8 Runtime |
+
+Сервер также опубликован в официальном [MCP Registry](https://registry.modelcontextprotocol.io) под именем `io.github.mahach666/pilotmcp`.
+
+### Выпуск релиза
+
+Релиз собирается GitHub Actions по тегу вида `vX.Y.Z` (semver, допускается суффикс `-beta.1`):
+
+```
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+Workflow [`release.yml`](.github/workflows/release.yml) прогоняет unit-тесты, собирает zip-архивы и `.mcpb`, создаёт GitHub Release и публикует [`server.json`](server.json) в MCP Registry (вход по OIDC, секреты не нужны). Версия берётся из тега. Манифест бандла — [`mcpb/manifest.json`](mcpb/manifest.json).
+
+На каждый push и pull request [`ci.yml`](.github/workflows/ci.yml) собирает проект и прогоняет unit-тесты. Интеграционные тесты (`Category=Integration`) требуют живой сервер Pilot и запускаются локально: `dotnet test PilotMCP.slnx` с параметрами из `PilotMCP.Tests/test.runsettings`.
+
 
 ## Подключение к MCP-клиенту
 

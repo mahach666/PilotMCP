@@ -4,6 +4,7 @@ using System.Text.RegularExpressions;
 namespace PilotMCP.Tests;
 
 [Collection("Pilot")]
+[Trait("Category", "Integration")]
 public class ReportToolsTests
 {
     private readonly McpTestClient _client;

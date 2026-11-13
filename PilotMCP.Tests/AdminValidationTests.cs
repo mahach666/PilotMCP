@@ -4,6 +4,7 @@ namespace PilotMCP.Tests;
 
 /// <summary>Проверки входа админских инструментов: ошибка возвращается до обращения к данным сервера.</summary>
 [Collection("Pilot")]
+[Trait("Category", "Integration")]
 public class AdminValidationTests
 {
     private readonly McpTestClient _client;

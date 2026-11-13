@@ -71,9 +71,10 @@ public static class XpsTextExtractor
     /// </summary>
     private static List<(string Path, XDocument Doc)> LoadFixedPages(ZipArchive zip)
     {
-        var order = PageOrder(zip);
+        var budget = new ReadBudget(MaxTotalBytes);
+        var order = PageOrder(zip, budget);
         if (order != null)
-            return order.Select(p => (p, XDocument.Parse(ReadPart(zip, p)
+            return order.Select(p => (p, XDocument.Parse(ReadPart(zip, p, budget)
                 ?? throw new InvalidDataException($"В XPS нет страницы '{p}', указанной в FixedDocument.")))).ToList();
 
         // shortcut: пакет без FixedDocumentSequence (нестандартный) — порядок по номерам в именах файлов
@@ -84,12 +85,11 @@ public static class XpsTextExtractor
 
         if (directPages.Count > 0)
         {
+            if (directPages.Count > MaxPages)
+                throw new InvalidDataException($"В XPS больше {MaxPages} страниц.");
             var docs = new List<(string, XDocument)>();
             foreach (var entry in directPages)
-            {
-                using var stream = entry.Open();
-                docs.Add((entry.FullName, XDocument.Load(stream)));
-            }
+                docs.Add((entry.FullName, XDocument.Parse(DecodeText(ReadEntries(new[] { entry }, entry.FullName, MaxPartBytes, budget)))));
             return docs;
         }
 
@@ -105,17 +105,12 @@ public static class XpsTextExtractor
             .OrderBy(g => NumericKey(g.Key))
             .ToList();
 
+        if (pieceGroups.Count > MaxPages)
+            throw new InvalidDataException($"В XPS больше {MaxPages} страниц.");
         var result = new List<(string, XDocument)>();
         foreach (var group in pieceGroups)
         {
-            var sb = new StringBuilder();
-            foreach (var piece in group.OrderBy(e => NumericKey(e.FullName)))
-            {
-                using var stream = piece.Open();
-                using var reader = new StreamReader(stream);
-                sb.Append(reader.ReadToEnd());
-            }
-            var xml = sb.ToString();
+            var xml = DecodeText(ReadEntries(group.OrderBy(e => NumericKey(e.FullName)), group.Key, MaxPartBytes, budget));
             if (!string.IsNullOrWhiteSpace(xml))
                 result.Add((group.Key, XDocument.Parse(xml)));
         }
@@ -124,27 +119,66 @@ public static class XpsTextExtractor
     }
 
     /// <summary>Пути страниц в порядке FixedDocumentSequence; null, если в пакете нет последовательности.</summary>
-    private static List<string>? PageOrder(ZipArchive zip)
+    private static List<string>? PageOrder(ZipArchive zip, ReadBudget budget)
     {
-        var rels = ReadPart(zip, "_rels/.rels");
+        var rels = ReadPart(zip, "_rels/.rels", budget);
         var seqTarget = rels == null ? null : XDocument.Parse(rels).Root?.Elements()
             .FirstOrDefault(r => ((string?)r.Attribute("Type"))?.EndsWith("/fixedrepresentation", StringComparison.OrdinalIgnoreCase) == true)
             ?.Attribute("Target")?.Value;
         if (seqTarget == null) return null;
         var seqPath = ResolvePart("", seqTarget);
-        var seq = ReadPart(zip, seqPath);
+        var seq = ReadPart(zip, seqPath, budget);
         if (seq == null) return null;
 
         var pages = new List<string>();
         foreach (var docRef in XDocument.Parse(seq).Root!.Elements().Where(e => e.Name.LocalName == "DocumentReference"))
         {
             var docPath = ResolvePart(seqPath, (string)docRef.Attribute("Source")!);
-            var doc = ReadPart(zip, docPath)
+            var doc = ReadPart(zip, docPath, budget)
                 ?? throw new InvalidDataException($"В XPS нет FixedDocument '{docPath}'.");
             pages.AddRange(XDocument.Parse(doc).Root!.Elements().Where(e => e.Name.LocalName == "PageContent")
                 .Select(pc => ResolvePart(docPath, (string)pc.Attribute("Source")!)));
+            // повторные ссылки на одну страницу легальны (MuPDF покажет обе), поэтому ограничиваем число, а не дубли
+            if (pages.Count > MaxPages)
+                throw new InvalidDataException($"В XPS больше {MaxPages} страниц.");
         }
         return pages;
+    }
+
+    // XPS приходит из базы Pilot (загрузить его может любой пользователь) — ограничиваем распаковку против zip-бомб.
+    private const long MaxPartBytes = 64L << 20;   // одна часть (страница, FixedDocument и т.п.)
+    private const long MaxTotalBytes = 512L << 20; // все XML-части одного извлечения
+    private const long MaxFontBytes = 32L << 20;   // один шрифт
+    private const long MaxFontsTotalBytes = 128L << 20;
+    private const int MaxPages = 10_000;
+
+    private sealed class ReadBudget(long bytes) { public long Remaining = bytes; }
+
+    /// <summary>Распаковывает записи подряд, не больше maxBytes на часть и не больше остатка бюджета.</summary>
+    private static byte[] ReadEntries(IEnumerable<ZipArchiveEntry> entries, string name, long maxBytes, ReadBudget budget)
+    {
+        using var ms = new MemoryStream();
+        var buffer = new byte[81920];
+        foreach (var entry in entries)
+        {
+            using var s = entry.Open();
+            int n;
+            while ((n = s.Read(buffer, 0, buffer.Length)) > 0)
+            {
+                if (ms.Length + n > maxBytes || n > budget.Remaining)
+                    throw new InvalidDataException($"Часть XPS '{name}' после распаковки превышает допустимый размер.");
+                budget.Remaining -= n;
+                ms.Write(buffer, 0, n);
+            }
+        }
+        return ms.ToArray();
+    }
+
+    /// <summary>Текст части с определением кодировки по BOM (XPS допускает UTF-8 и UTF-16).</summary>
+    private static string DecodeText(byte[] bytes)
+    {
+        using var reader = new StreamReader(new MemoryStream(bytes), Encoding.UTF8, detectEncodingFromByteOrderMarks: true);
+        return reader.ReadToEnd();
     }
 
     /// <summary>Ссылка Source (абсолютная или относительно части basePart) → имя записи в ZIP.</summary>
@@ -165,17 +199,11 @@ public static class XpsTextExtractor
     }
 
     /// <summary>Содержимое части пакета: целиком или склеенное из кусков [N].piece; null, если части нет.</summary>
-    private static string? ReadPart(ZipArchive zip, string name)
+    private static string? ReadPart(ZipArchive zip, string name, ReadBudget budget)
     {
         var parts = PartEntries(zip, name);
-        if (parts.Length == 0) return null;
-        var sb = new StringBuilder();
-        foreach (var part in parts)
-        {
-            using var reader = new StreamReader(part.Open());
-            sb.Append(reader.ReadToEnd());
-        }
-        return sb.ToString();
+        // куски склеиваются по байтам: граница [N].piece может разрезать многобайтовый символ
+        return parts.Length == 0 ? null : DecodeText(ReadEntries(parts, name, MaxPartBytes, budget));
     }
 
     /// <summary>Число страниц XPS (по FixedDocument, как нумерует рендерер).</summary>
@@ -434,6 +462,7 @@ public static class XpsTextExtractor
     private sealed class FontCache(ZipArchive zip) : IDisposable
     {
         private readonly Dictionary<string, SKTypeface?> _fonts = new(StringComparer.OrdinalIgnoreCase);
+        private readonly ReadBudget _fontBudget = new(MaxFontsTotalBytes);
 
         public SKTypeface? Get(string part)
         {
@@ -443,13 +472,7 @@ public static class XpsTextExtractor
             {
                 var entries = PartEntries(zip, part);
                 if (entries.Length == 0) throw new InvalidDataException("часть пакета не найдена");
-                using var ms = new MemoryStream();
-                foreach (var entry in entries)
-                {
-                    using var s = entry.Open();
-                    s.CopyTo(ms);
-                }
-                var data = ms.ToArray();
+                var data = ReadEntries(entries, part, MaxFontBytes, _fontBudget);
                 if (part.EndsWith(".odttf", StringComparison.OrdinalIgnoreCase))
                     Deobfuscate(data, Path.GetFileNameWithoutExtension(part));
                 using var skData = SKData.CreateCopy(data);

@@ -3,6 +3,7 @@ using System.Text.Json.Nodes;
 namespace PilotMCP.Tests;
 
 [Collection("Pilot")]
+[Trait("Category", "Integration")]
 public class DocumentToolsTests
 {
     private readonly McpTestClient _client;

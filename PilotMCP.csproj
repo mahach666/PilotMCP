@@ -7,7 +7,8 @@
     <AssemblyName>PilotMCP</AssemblyName>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
-    <Version>0.0.0.4</Version>
+    <!-- При релизе версию задаёт тег vX.Y.Z (release.yml передаёт -p:Version) -->
+    <Version>0.1.0</Version>
   </PropertyGroup>
 
   <ItemGroup>
@@ -57,8 +58,8 @@
     <MakeDir Directories="$(ReleaseArtifactsDir)" />
 
     <!-- SkipReleasePackaging гасит рекурсию: publish снова прогоняет Build этого же проекта -->
-    <Exec Command="dotnet publish &quot;$(MSBuildProjectFullPath)&quot; -c Release -r $(ReleaseRid) --self-contained false -o &quot;$(FrameworkStageDir)&quot; -p:SkipReleasePackaging=true --nologo -v quiet" />
-    <Exec Command="dotnet publish &quot;$(MSBuildProjectFullPath)&quot; -c Release -r $(ReleaseRid) --self-contained true -o &quot;$(SelfContainedStageDir)&quot; -p:SkipReleasePackaging=true --nologo -v quiet" />
+    <Exec Command="dotnet publish &quot;$(MSBuildProjectFullPath)&quot; -c Release -r $(ReleaseRid) --self-contained false -o &quot;$(FrameworkStageDir)&quot; -p:SkipReleasePackaging=true -p:Version=$(Version) --nologo -v quiet" />
+    <Exec Command="dotnet publish &quot;$(MSBuildProjectFullPath)&quot; -c Release -r $(ReleaseRid) --self-contained true -o &quot;$(SelfContainedStageDir)&quot; -p:SkipReleasePackaging=true -p:Version=$(Version) --nologo -v quiet" />
 
     <ItemGroup>
       <!-- Отладочные символы в релизе не нужны: один только libSkiaSharp.pdb — 80 МБ -->

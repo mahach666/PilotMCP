@@ -1,0 +1,95 @@
+{
+  "manifest_version": "0.3",
+  "name": "pilotmcp",
+  "display_name": "PilotMCP",
+  "version": "0.0.0",
+  "description": "MCP server for ASCON Pilot-ICE PDM: objects, documents, remarks, search, messenger, admin.",
+  "author": {
+    "name": "mahach666",
+    "url": "https://github.com/mahach666"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/mahach666/PilotMCP"
+  },
+  "homepage": "https://github.com/mahach666/PilotMCP",
+  "license": "Apache-2.0",
+  "server": {
+    "type": "binary",
+    "entry_point": "server/PilotMCP.exe",
+    "mcp_config": {
+      "command": "${__dirname}/server/PilotMCP.exe",
+      "args": [],
+      "env": {
+        "PILOT_SERVER_URL": "${user_config.server_url}",
+        "PILOT_LOGIN": "${user_config.login}",
+        "PILOT_PASSWORD": "${user_config.password}",
+        "PILOT_DATABASE": "${user_config.database}",
+        "PILOT_LICENSE_TYPE": "${user_config.license_type}",
+        "PILOT_READONLY": "${user_config.readonly}",
+        "PILOT_ADMIN_LOGIN": "${user_config.admin_login}",
+        "PILOT_ADMIN_PASSWORD": "${user_config.admin_password}"
+      }
+    }
+  },
+  "user_config": {
+    "server_url": {
+      "type": "string",
+      "title": "Pilot server URL",
+      "description": "Например http://localhost:5545/u_db_name",
+      "required": true
+    },
+    "login": {
+      "type": "string",
+      "title": "Login",
+      "description": "Логин пользователя Pilot",
+      "required": true
+    },
+    "password": {
+      "type": "string",
+      "title": "Password",
+      "description": "Пароль пользователя Pilot",
+      "sensitive": true,
+      "required": true
+    },
+    "database": {
+      "type": "string",
+      "title": "Database",
+      "description": "Имя базы данных; пусто — берётся из URL",
+      "required": false,
+      "default": ""
+    },
+    "license_type": {
+      "type": "string",
+      "title": "License type",
+      "description": "Код лицензии Pilot (по умолчанию 100)",
+      "required": false,
+      "default": "100"
+    },
+    "readonly": {
+      "type": "boolean",
+      "title": "Read-only mode",
+      "description": "Запретить все операции записи",
+      "required": false,
+      "default": false
+    },
+    "admin_login": {
+      "type": "string",
+      "title": "Server admin login",
+      "description": "Администратор сервера для инструментов метаданных и пользователей; пусто — основной логин",
+      "required": false,
+      "default": ""
+    },
+    "admin_password": {
+      "type": "string",
+      "title": "Server admin password",
+      "description": "Пароль администратора сервера",
+      "sensitive": true,
+      "required": false,
+      "default": ""
+    }
+  },
+  "compatibility": {
+    "platforms": ["win32"]
+  }
+}

@@ -9,6 +9,7 @@ namespace PilotMCP.Tests;
 /// Если админ-авторизация недоступна — тесты логируют причину и мягко пропускаются.
 /// </summary>
 [Collection("Pilot")]
+[Trait("Category", "Integration")]
 public class PeopleAdminToolsTests
 {
     private readonly McpTestClient _client;

@@ -1,0 +1,14 @@
+{
+  "build": {
+    "content": [
+      { "src": "docs", "files": ["*.md", "toc.yml", "tools/*.md", "tools/toc.yml"] }
+    ],
+    "output": "_site",
+    "globalMetadata": {
+      "_appTitle": "PilotMCP",
+      "_appFooter": "PilotMCP распространяется по лицензии Apache-2.0. Не связан с компанией АСКОН.",
+      "_enableSearch": true
+    },
+    "template": ["default", "modern"]
+  }
+}

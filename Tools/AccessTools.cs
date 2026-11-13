@@ -11,9 +11,16 @@ public class AccessTools
     private readonly PilotConnection _connection;
     public AccessTools(PilotConnection connection) => _connection = connection;
 
+    // Шкала прав с Pilot 26.20: Edit разбит на EditAttributes/EditFiles/Delete
+    private const string AccessLevelsHelp =
+        "Флаги: None, Create, EditAttributes, View, Freeze, Approve, Share, EditFiles, Delete. " +
+        "Комбинации: Edit = EditAttributes+EditFiles+Delete, ViewCreate, ViewEdit = View+Create+Edit, " +
+        "ViewEditApprove, Full. Agreement и ViewEditAgrement — устаревшие синонимы Approve и ViewEditApprove " +
+        "(в выводе могут печататься под старыми именами).";
+
     [McpServerTool, Description(
         "Проверить права доступа пользователя к объекту. " +
-        "Уровни: None, Create, Edit, View, ViewCreate, ViewEdit, Freeze, Agreement, Share, Full.")]
+        AccessLevelsHelp)]
     public Task<string> CheckAccess(
         [Description("GUID объекта")] string objectId,
         [Description("ID пользователя (personId). Если 0, проверяет текущего.")] int personId = 0)
@@ -102,12 +109,11 @@ public class AccessTools
     }
 
     [McpServerTool, Description(
-        "Добавить запись прав доступа к объекту. " +
-        "Уровни: None, Create, Edit, View, ViewCreate, ViewEdit, Freeze, Agreement, ViewEditAgrement, Share, Full.")]
+        "Добавить запись прав доступа к объекту. " + AccessLevelsHelp)]
     public Task<string> AddAccessRecord(
         [Description("GUID объекта")] string objectId,
         [Description("ID позиции (orgUnitId)")] int positionId,
-        [Description("Уровень доступа: None, Create, Edit, View, ViewCreate, ViewEdit, Freeze, Agreement, ViewEditAgrement, Share, Full")] string accessLevel,
+        [Description("Уровень доступа: имя флага или несколько через запятую, например 'View,EditAttributes'")] string accessLevel,
         [Description("Наследование: None, InheritUntilSecret, InheritWholeSubtree")] string inheritance = "InheritWholeSubtree",
         [Description("Тип: Allow или Deny")] string accessType = "Allow")
     {
@@ -123,8 +129,8 @@ public class AccessTools
                 return ToolResult.Error($"Неизвестный тип доступа: {accessType}");
 
             var modifier = _connection.CreateModifier();
-            modifier.EditObject(guid).AddAccessRecord(positionId, level, DateTime.MaxValue, inh, aType, Array.Empty<int>());
-            if (modifier.AnyChanges()) modifier.Apply(null);
+            modifier.EditObject(guid).AddAccessRecord(positionId, level, DateTime.MaxValue, inh, aType);
+            if (modifier.AnyChanges()) _connection.ApplyAndWait(() => modifier.Apply(null));
             return ToolResult.Ok($"Право доступа добавлено: позиция #{positionId}, уровень {accessLevel}.");
         });
     }
@@ -140,7 +146,7 @@ public class AccessTools
 
             var modifier = _connection.CreateModifier();
             modifier.EditObject(guid).RemoveAccessRecords(_ => true);
-            if (modifier.AnyChanges()) modifier.Apply(null);
+            if (modifier.AnyChanges()) _connection.ApplyAndWait(() => modifier.Apply(null));
             return ToolResult.Ok($"Все записи доступа удалены с объекта {objectId}.");
         });
     }

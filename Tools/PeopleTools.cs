@@ -31,7 +31,7 @@ public class PeopleTools
             sb.AppendLine($"Пользователи ({people.Count}):");
             foreach (var p in people)
             {
-                sb.AppendLine($"  #{p.Id}: {p.DisplayName ?? p.Login}");
+                sb.AppendLine($"  #{p.Id}: {p.FullName}");
                 sb.AppendLine($"    Login: {p.Login}, Email: {p.Email ?? ""}, Phone: {p.Phone ?? ""}");
                 sb.AppendLine($"    AccountState: {p.AccountState}, IsAdmin: {p.IsAdmin}, IsDeleted: {p.IsDeleted}, IsInactive: {p.IsInactive}");
                 if (!string.IsNullOrEmpty(p.Comment)) sb.AppendLine($"    Comment: {p.Comment}");
@@ -99,7 +99,7 @@ public class PeopleTools
             sb.AppendLine($"Позиция #{positionId}: {unit.Title}");
             if (person != null)
             {
-                sb.AppendLine($"  Сотрудник: {person.DisplayName} (#{person.Id})");
+                sb.AppendLine($"  Сотрудник: {person.FullName} (#{person.Id})");
                 sb.AppendLine($"  Логин: {person.Login}");
                 if (!string.IsNullOrEmpty(person.Email)) sb.AppendLine($"  Email: {person.Email}");
                 if (!string.IsNullOrEmpty(person.Phone)) sb.AppendLine($"  Телефон: {person.Phone}");

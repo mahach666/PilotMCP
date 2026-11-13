@@ -1,0 +1,31 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.mahach666/pilotmcp",
+  "description": "MCP server for ASCON Pilot-ICE PDM: objects, documents, remarks, search, admin",
+  "version": "0.0.0",
+  "repository": {
+    "url": "https://github.com/mahach666/PilotMCP",
+    "source": "github"
+  },
+  "packages": [
+    {
+      "registryType": "mcpb",
+      "identifier": "https://github.com/mahach666/PilotMCP/releases/download/v0.0.0/PilotMCP-v0.0.0-win-x64.mcpb",
+      "version": "0.0.0",
+      "fileSha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        { "name": "PILOT_SERVER_URL", "description": "Pilot server URL, e.g. http://localhost:5545/u_db_name", "isRequired": true, "format": "string" },
+        { "name": "PILOT_LOGIN", "description": "Pilot user login", "isRequired": true, "format": "string" },
+        { "name": "PILOT_PASSWORD", "description": "Pilot user password", "isRequired": true, "isSecret": true, "format": "string" },
+        { "name": "PILOT_DATABASE", "description": "Database name (empty: taken from the URL)", "format": "string" },
+        { "name": "PILOT_LICENSE_TYPE", "description": "License code (default 100)", "format": "number", "default": "100" },
+        { "name": "PILOT_READONLY", "description": "Read-only mode: true or 1 blocks all write tools", "format": "boolean", "default": "false" },
+        { "name": "PILOT_ADMIN_LOGIN", "description": "Server administrator login for metadata/people tools", "format": "string" },
+        { "name": "PILOT_ADMIN_PASSWORD", "description": "Server administrator password", "isSecret": true, "format": "string" }
+      ]
+    }
+  ]
+}

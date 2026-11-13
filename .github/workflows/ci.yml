@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+    tags-ignore: ["**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    # windows: unit-тесты ширины глифов XPS берут системный шрифт arial.ttf
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Build
+        run: dotnet build PilotMCP.slnx -c Debug --nologo
+
+      # Интеграционные тесты (Category=Integration) требуют живой сервер Pilot — в CI только unit-тесты
+      - name: Unit tests
+        run: dotnet test PilotMCP.slnx -c Debug --no-build --nologo --filter "Category!=Integration" --logger "trx;LogFileName=unit.trx"
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: "**/TestResults/*.trx"

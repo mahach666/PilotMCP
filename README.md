@@ -2,10 +2,39 @@
 
 MCP-сервер для работы с Pilot через Server API. Позволяет LLM-агентам подключаться к серверу Pilot, выполнять поиск, создавать и изменять объекты, работать с документами, историей изменений, правами доступа и чатами.
 
+Документация: https://mahach666.github.io/PilotMCP/
+
 ## Требования
 
 - .NET 8.0
 - Доступ к серверу Pilot
+
+## Установка
+
+Подробнее об установке и настройке клиентов — в [документации](https://mahach666.github.io/PilotMCP/getting-started.html).
+
+Готовые сборки (Windows x64) — на странице [Releases](https://github.com/mahach666/PilotMCP/releases):
+
+| Файл | Для чего |
+| ---- | -------- |
+| `PilotMCP-vX.Y.Z-win-x64.mcpb` | MCP Bundle: установка в Claude Desktop в один клик, параметры подключения вводятся в форме |
+| `PilotMCP-vX.Y.Z-win-x64-selfcontained.zip` | Распаковать и указать `PilotMCP.exe` в конфигурации клиента; .NET не нужен |
+| `PilotMCP-vX.Y.Z-win-x64.zip` | То же, но нужен установленный .NET 8 Runtime |
+
+Сервер также опубликован в официальном [MCP Registry](https://registry.modelcontextprotocol.io) под именем `io.github.mahach666/pilotmcp`.
+
+### Выпуск релиза
+
+Релиз собирается GitHub Actions по тегу вида `vX.Y.Z` (semver, допускается суффикс `-beta.1`):
+
+```
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+Workflow [`release.yml`](.github/workflows/release.yml) прогоняет unit-тесты, собирает zip-архивы и `.mcpb`, создаёт GitHub Release и публикует [`server.json`](server.json) в MCP Registry (вход по OIDC, секреты не нужны). Версия берётся из тега. Манифест бандла — [`mcpb/manifest.json`](mcpb/manifest.json).
+
+На каждый push и pull request [`ci.yml`](.github/workflows/ci.yml) собирает проект и прогоняет unit-тесты. Интеграционные тесты (`Category=Integration`) требуют живой сервер Pilot и запускаются локально: `dotnet test PilotMCP.slnx` с параметрами из `PilotMCP.Tests/test.runsettings`.
 
 
 ## Подключение к MCP-клиенту
@@ -46,11 +75,17 @@ MCP-сервер для работы с Pilot через Server API. Позво�
 }
 ```
 
+### Надёжность записи
+
+- Операции записи через Modifier/Backend (создание и изменение объектов, связей, задач, замечаний и т.д.) дожидаются ответа сервера (до 60 с). Отказ сервера возвращается как ошибка с его текстом; по таймауту сообщается, что результат неизвестен.
+- При обрыве соединения PilotMCP переподключается и повторяет только читающие вызовы. Записи после таймаута или обрыва автоматически не повторяются, чтобы не создать дубликаты, — проверьте состояние и повторите вручную.
+- Метаданные перечитываются, когда сервер сообщает об их изменении; параллельные изменения метаданных внутри одного процесса PilotMCP выполняются последовательно.
+
 ### Режим только чтения
 
 При `PILOT_READONLY=true` сервер сообщает модели об ограничениях через системный промпт при инициализации. Модель не будет пытаться выполнять операции записи и сразу сообщит пользователю об ограничении.
 
-Заблокированы: `CreateObject`, `SetAttribute`, `DeleteObject`, `RestoreObject`, `MoveObject`, `LockObject`, `UnlockObject`, `FreezeObject`, `UnfreezeObject`, `MakeSecret`, `MakePublic`, `DeleteFile`, `SetUserState`, `Subscribe`, `Unsubscribe`, `AnnotateText`, `CreateAnnotation`, `SendMessage`, `EditMessage`, `ReplyMessage`, `CreateChat`, `UploadFile`, `InvokeCommand`, `CreateLink`, `DeleteRelation`, `AddAccessRecord`, `RemoveAllAccessRecords`, `UpdatePerson`, `ChangeSettings`, `CreateReport`, `UpdateReport`, `CreateTask`, `CreateWorkflow`, `AddSignatureRequest`, `CreateAutomationConfig`, `UpdateAutomationConfig`, `DeleteAutomationConfig`, `CreateType`, `UpdateType`, `DeleteType`, `AddTypeChildren`, `AddTypeAttribute`, `UpdateTypeAttribute`, `DeleteTypeAttribute`, `CreateUserState`, `UpdateUserState`, `DeleteUserState`, `CreateStateMachine`, `UpdateStateMachine`, `DeleteStateMachine`, `CreatePerson`, `UpdatePersonAdmin`, `DeletePerson`, `CreateOrgUnit`, `UpdateOrgUnit`, `DeleteOrgUnit`, `MoveOrgUnits`, `SetPersonOnPosition`, `RemovePersonFromPosition`.
+Заблокированы: `CreateObject`, `SetAttribute`, `DeleteObject`, `RestoreObject`, `MoveObject`, `LockObject`, `UnlockObject`, `FreezeObject`, `UnfreezeObject`, `MakeSecret`, `MakePublic`, `DeleteFile`, `SetUserState`, `Subscribe`, `Unsubscribe`, `AnnotateText`, `CreateAnnotation`, `CreateMarkupAnnotation`, `SendMessage`, `EditMessage`, `ReplyMessage`, `CreateChat`, `UploadFile`, `InvokeCommand`, `CreateLink`, `DeleteRelation`, `AddAccessRecord`, `RemoveAllAccessRecords`, `UpdatePerson`, `ChangeSettings`, `CreateReport`, `UpdateReport`, `CreateTask`, `CreateWorkflow`, `AddSignatureRequest`, `CreateAutomationConfig`, `UpdateAutomationConfig`, `DeleteAutomationConfig`, `CreateType`, `UpdateType`, `DeleteType`, `AddTypeChildren`, `AddTypeAttribute`, `UpdateTypeAttribute`, `DeleteTypeAttribute`, `CreateUserState`, `UpdateUserState`, `DeleteUserState`, `CreateStateMachine`, `UpdateStateMachine`, `DeleteStateMachine`, `CreatePerson`, `UpdatePersonAdmin`, `DeletePerson`, `CreateOrgUnit`, `UpdateOrgUnit`, `DeleteOrgUnit`, `MoveOrgUnits`, `SetPersonOnPosition`, `RemovePersonFromPosition`.
 
 ---
 
@@ -89,24 +124,24 @@ ExportCsv("tmp/filter_x.jsonl", "C:/result/docs.csv", "name,typeName,created")
 | `GetAttribute`   | Прочитать полное значение одного атрибута без обрезки (когда GetObject обрезал значение) |
 | `GetType`        | Информация о типе объекта по системному имени                                            |
 | `GetTypes`       | Все типы объектов базы → JSONL-файл                                                      |
-| `CreateObject`   | Создать объект (родитель, тип, атрибут)                                                  |
-| `SetAttribute`   | Установить значение атрибута объекта                                                     |
+| `CreateObject`   | Создать объект (родитель, тип, атрибут; значение разбирается по типу атрибута, неизвестный атрибут — ошибка) |
+| `SetAttribute`   | Установить значение атрибута объекта (значение разбирается по типу атрибута: числа/даты в инвариантном формате; неизвестный атрибут — ошибка) |
 | `DeleteObject`   | Удалить объект (в корзину)                                                               |
 | `RestoreObject`  | Восстановить объект из корзины                                                           |
 | `MoveObject`     | Переместить объект в другую папку                                                        |
-| `LockObject`     | Заблокировать объект (эксклюзивное редактирование)                                       |
-| `UnlockObject`   | Разблокировать объект                                                                    |
-| `FreezeObject`   | Заморозить объект (запретить редактирование)                                             |
-| `UnfreezeObject` | Разморозить объект (разрешить редактирование)                                            |
+| `LockObject`     | Заблокировать объект (эксклюзивное редактирование); только из состояния Alive            |
+| `UnlockObject`   | Разблокировать объект; только из LockRequested/LockAccepted                              |
+| `FreezeObject`   | Заморозить объект (запретить редактирование); только из состояния Alive                  |
+| `UnfreezeObject` | Разморозить объект (разрешить редактирование); только из состояния Frozen                |
 | `MakeSecret`     | Сделать объект секретным (ограниченный доступ)                                           |
 | `MakePublic`     | Снять секретность с объекта                                                              |
 | `SetUserState`   | Установить пользовательское состояние (UserState) на объекте                             |
 | `Subscribe`      | Подписаться на уведомления об изменениях объекта                                         |
 | `Unsubscribe`    | Отписаться от уведомлений об изменениях объекта                                          |
-| `DownloadFile`   | Скачать файл из Pilot на диск                                                            |
-| `UploadFile`     | Загрузить файл с диска и прикрепить к объекту                                            |
+| `DownloadFile`   | Скачать файл из Pilot на диск (через `.part`: существующий файл не затирается при сбое; пустое содержимое — ошибка) |
+| `UploadFile`     | Загрузить файл с диска в объект: новая версия, прежние файлы сохраняются, одноимённый заменяется |
 | `DeleteFile`     | Удалить файл из объекта по его Body.Id                                                   |
-| `GetFileSize`    | Проверить размер файла в архиве Pilot (без скачивания)                                   |
+| `GetFileSize`    | Размер файла в архиве Pilot по Body.Id (считается чтением по частям, без сохранения на диск; пустой/несуществующий — ошибка) |
 | `ComputeFileMd5` | Вычислить MD5-хэш файла из архива Pilot (по Body.Id) или локального файла                |
 
 
@@ -115,16 +150,16 @@ ExportCsv("tmp/filter_x.jsonl", "C:/result/docs.csv", "name,typeName,created")
 
 | Инструмент          | Описание                                                                 |
 | ------------------- | ------------------------------------------------------------------------ |
-| `Search`            | Поиск объектов по атрибутам → JSONL-файл                                 |
-| `SearchByText`      | Полнотекстовый поиск по всем атрибутам и содержимому                     |
+| `Search`            | Комбинированный поиск → JSONL-файл. Некорректные фильтры (GUID, даты, атрибут) — ошибка, а не более широкий поиск |
+| `SearchByText`      | Полнотекстовый поиск; спецсимволы Lucene (`: ( ) " -` и др.) ищутся буквально |
 | `SearchInContext`   | Поиск объектов внутри папки (рекурсивно по всем вложенным)               |
 | `SearchByType`      | Поиск объектов по типу (typeId из GetTypes)                              |
-| `SearchByAttribute` | Поиск объектов по значению атрибута                                      |
+| `SearchByAttribute` | Поиск по значению СТРОКОВОГО атрибута (фраза из нескольких слов — одним термом) |
 | `SearchByState`     | Поиск объектов по пользовательскому состоянию (UserState)                |
 | `SearchByCreator`   | Поиск объектов по создателю (personId)                                   |
-| `SearchByDate`      | Поиск объектов по дате создания (диапазон)                               |
+| `SearchByDate`      | Диапазон дат создания (ISO 8601, UTC; `to` без времени включает весь день; пустая граница — открытая) |
 | `GetAllObjects`     | Получить все объекты базы (поиск в контексте корня)                      |
-| `GetChildren`       | Дочерние объекты по GUID → JSONL-файл                                    |
+| `GetChildren`       | Дочерние объекты по GUID → JSONL-файл (при недоступных объектах пишет «загружено X из Y») |
 | `GetRootObjects`    | Корневые объекты базы → JSONL-файл                                       |
 | `GetObjectsToFile`  | Несколько объектов по списку GUID → JSONL-файл                           |
 | `GetUserStates`     | Список пользовательских состояний (UserStates) — для задач и workflow    |
@@ -141,7 +176,7 @@ ExportCsv("tmp/filter_x.jsonl", "C:/result/docs.csv", "name,typeName,created")
 | `GetPeopleByIds`       | Подробная информация о пользователях по списку ID                 |
 | `GetOrgUnitsByIds`     | Подробная информация об оргединицах по списку ID                  |
 | `GetPersonOnPosition`  | Узнать кто занимает указанную позицию (по positionId)             |
-| `UpdatePerson`         | Обновить email, phone, comment, isInactive пользователя           |
+| `UpdatePerson`         | Обновить email, phone, comment, isInactive пользователя по personId (админский API) |
 
 #### Управление пользователями и оргструктурой (админский API)
 
@@ -171,13 +206,13 @@ ExportCsv("tmp/filter_x.jsonl", "C:/result/docs.csv", "name,typeName,created")
 
 | Инструмент           | Описание                                                                 |
 | -------------------- | ------------------------------------------------------------------------ |
-| `ExtractFields`      | Извлечь выбранные поля из JSONL → новый JSONL                            |
+| `ExtractFields`      | Извлечь выбранные поля из JSONL → новый JSONL (отсутствующее поле = null). `outputFile` не может совпадать с `inputFile` (во всех инструментах записи) |
 | `FilterObjects`      | Отфильтровать записи по значению поля → новый JSONL                      |
 | `ExtractFieldToText` | Извлечь одно поле построчно в текстовый файл                             |
 | `PreviewFile`        | Просмотреть N записей из файла (до 20)                                   |
-| `ReadFile`           | Прочитать текстовый файл (или его часть) с пагинацией через offset/limit |
+| `ReadFile`           | Прочитать текстовый файл (или его часть) с пагинацией через offset/limit (отрицательный offset = 0) |
 | `CountFile`          | Количество записей в файле                                               |
-| `ExportCsv`          | Экспортировать JSONL в CSV                                               |
+| `ExportCsv`          | Экспортировать JSONL в CSV (колонки по умолчанию — объединение ключей всех записей) |
 | `SaveResult`         | Скопировать файл результатов в указанное место                           |
 
 
@@ -186,13 +221,22 @@ ExportCsv("tmp/filter_x.jsonl", "C:/result/docs.csv", "name,typeName,created")
 
 | Инструмент             | Описание                                                                      |
 | ---------------------- | ----------------------------------------------------------------------------- |
-| `GetDocumentText`      | Извлечь текст документа (XPS или PDF) для анализа                             |
-| `FindTextOnPage`       | Найти текст на страницах и получить его координаты                            |
-| `ExtractPageText`      | Извлечь все текстовые блоки со страницы с координатами → JSONL                |
-| `GetDocumentPageImage` | Получить изображение страницы документа (PDF или XPS) для визуального анализа |
-| `AnnotateText`         | Создать текстовое замечание к слову/фразе в документе (XPS или PDF)           |
-| `CreateAnnotation`     | Создать графическое замечание (прямоугольник, эллипс, стрелка и т.п.)         |
-| `BuildAnnotationXml`   | Сгенерировать XML-разметку аннотации без создания объекта                     |
+| `GetDocumentText`      | Извлечь текст документа (XPS или PDF) для анализа; число страниц берётся из файла, `page` вне диапазона — ошибка, для документа без текстового слоя (скан) сообщается об этом; `maxChars` действует и на превью |
+| `FindTextOnPage`       | Найти все вхождения текста и получить координаты; пустой `searchText` — ошибка. Единицы: XPS — 1/96 дюйма, PDF — пункты (1/72 дюйма), y — верх текста сверху вниз (указаны в ответе) |
+| `ExtractPageText`      | Извлечь все текстовые блоки со страницы с координатами → JSONL (единицы те же, что у `FindTextOnPage`) |
+| `GetDocumentPageImage` | Получить изображение страницы документа (PDF или XPS); `dpi` 36-300, длинная сторона не больше 2000 px (при превышении dpi снижается, фактический указан в ответе), `page` вне диапазона — ошибка; PNG сохраняется в `%TEMP%\pilot-mcp` и удаляется через сутки |
+| `AnnotateText`         | Замечание к слову/фразе (XPS или PDF): `style` = `highlight` (по умолчанию), `underline`, `strikeout` |
+| `CreateAnnotation`     | Графическое замечание: `rectangle`, `ellipse`, `triangle`, `arrow`, `line`, `polyline`, `polygon`, `ink`, `point`; параметры `strokeWidth`, `points` (`x1,y1;x2,y2;...`), `cloud`, `startEnding`/`endEnding` |
+| `CreateMarkupAnnotation` | ОДНО замечание из нескольких фигур: `shapesJson` — JSON-массив с полями как у `CreateAnnotation` |
+| `GetAnnotations`       | Прочитать замечания документа (формат markup/legacy, фигуры, страница, прямоугольник в пикселях, автор, версия файла); замечания из корзины пропускаются; нечитаемое замечание выводится с полем `error` |
+| `BuildAnnotationXml`   | Сгенерировать XML-разметку аннотации в старом (legacy) формате без создания объекта |
+
+**Формат замечаний.** По умолчанию `AnnotateText`, `CreateAnnotation` и `CreateMarkupAnnotation` создают замечания
+в формате Markup (клиент Pilot 26.20+: атрибуты `markups` и `markups_version`). Параметр `format=legacy`
+(`AnnotateText`, `CreateAnnotation`) создаёт замечание в старом формате (атрибут `annotation`) для серверов и клиентов
+старше 26.20; новые фигуры и параметры в нём недоступны. Координаты фигур — в пикселях изображения от
+`GetDocumentPageImage` (тот же `dpi`); размеры страниц берутся из того же файла (XPS, иначе PDF).
+Окончания линий: `none`, `openarrow` (у `arrow` по умолчанию `openarrow` на острие).
 
 
 ### История и версии
@@ -201,7 +245,7 @@ ExportCsv("tmp/filter_x.jsonl", "C:/result/docs.csv", "name,typeName,created")
 | Инструмент      | Описание                                  |
 | --------------- | ----------------------------------------- |
 | `GetHistory`    | История изменений объектов по списку GUID |
-| `GetChangesets` | Changesets в диапазоне ID                 |
+| `GetChangesets` | Changesets в диапазоне ID (номер, identity, GUID изменённых; не более 1000 номеров) |
 
 
 ### Права доступа
@@ -214,7 +258,7 @@ ExportCsv("tmp/filter_x.jsonl", "C:/result/docs.csv", "name,typeName,created")
 | `GetAccessRecords`       | Записи прав доступа для объекта (кому и какие)              |
 | `AddAccessRecord`        | Добавить запись прав доступа к объекту                      |
 | `RemoveAllAccessRecords` | Удалить все ограничения доступа (сделать объект публичным)  |
-| `GetObjectsWithRights`   | Объекты с информацией о правах текущего пользователя        |
+| `GetObjectsWithRights`   | Объекты с информацией о правах текущего пользователя (до 20 записей прав на объект; некорректный GUID — ошибка) |
 | `GetSubscribers`         | Подписчики объекта (personIds пользователей)                |
 
 
@@ -223,7 +267,7 @@ ExportCsv("tmp/filter_x.jsonl", "C:/result/docs.csv", "name,typeName,created")
 
 | Инструмент       | Описание                                         |
 | ---------------- | ------------------------------------------------ |
-| `CreateLink`     | Создать двустороннюю связь между двумя объектами |
+| `CreateLink`     | Создать двустороннюю связь между двумя объектами (дубликат с тем же типом и именем не создаётся; допустимы только перечисленные типы) |
 | `DeleteRelation` | Удалить связь между объектами                    |
 
 
@@ -233,13 +277,13 @@ ExportCsv("tmp/filter_x.jsonl", "C:/result/docs.csv", "name,typeName,created")
 | Инструмент        | Описание                                                           |
 | ----------------- | ------------------------------------------------------------------ |
 | `GetChats`        | Список чатов текущего пользователя                                 |
-| `GetChat`         | Информация о конкретном чате (тип, описание, связи, непрочитанные) |
-| `GetPersonalChat` | Найти личный чат с пользователем по personId                       |
+| `GetChat`         | Информация о конкретном чате (тип, описание, связи, непрочитанные); несуществующий чат — ошибка |
+| `GetPersonalChat` | Личный чат с пользователем по personId (ошибка, если чата ещё нет; инструмент его не создаёт) |
 | `GetChatMembers`  | Участники чата (роли, статусы уведомлений)                         |
 | `CreateChat`      | Создать групповой чат                                              |
-| `GetMessages`     | Сообщения в чате                                                   |
+| `GetMessages`     | Сообщения чата, skip=0 — самые новые; skip растёт назад по истории. Правки показываются с пометкой (ред.), реакции и markdown помечаются |
 | `GetMessage`      | Одно сообщение по GUID (автор, дата, тип, текст)                   |
-| `SearchMessages`  | Поиск сообщений по тексту во всех или указанных чатах              |
+| `SearchMessages`  | Поиск сообщений по тексту в указанных или (при пустом chatIds) во всех чатах пользователя; некорректный GUID — ошибка |
 | `GetRelatedChats` | Чаты, связанные с объектом (обсуждение задачи/документа)           |
 | `SendMessage`     | Отправить сообщение в чат                                          |
 | `EditMessage`     | Редактировать ранее отправленное сообщение                         |
@@ -254,7 +298,7 @@ ExportCsv("tmp/filter_x.jsonl", "C:/result/docs.csv", "name,typeName,created")
 | --------------------- | ---------------------------------------------- |
 | `GetPersonalSettings` | Персональные настройки пользователя по разделу |
 | `GetCommonSettings`   | Общие настройки базы                           |
-| `ChangeSettings`      | Изменить персональную или общую настройку      |
+| `ChangeSettings`      | Изменить настройку пользователя (personId) или оргединицы (orgUnitId); нужен один из двух |
 
 
 ### Отчёты (.repx)
@@ -313,8 +357,8 @@ ExportCsv("tmp/filter_x.jsonl", "C:/result/docs.csv", "name,typeName,created")
 
 | Инструмент       | Описание                                               |
 | ---------------- | ------------------------------------------------------ |
-| `CreateTask`     | Создать задачу (тип начинается с 'task_', из GetTypes) |
-| `CreateWorkflow` | Создать workflow (процесс) со стадиями и задачами      |
+| `CreateTask`     | Создать задачу (тип с префиксом 'task_'). deadline — yyyy-MM-dd, срок до 23:59:59 этого дня; некорректные deadline, attachmentIds (в т.ч. несуществующие объекты) и attributes дают ошибку |
+| `CreateWorkflow` | Создать пустой workflow (тип с префиксом 'workflow_', без стадий); инициатор по умолчанию — первая позиция пользователя |
 
 
 ### Подписи
@@ -322,7 +366,7 @@ ExportCsv("tmp/filter_x.jsonl", "C:/result/docs.csv", "name,typeName,created")
 
 | Инструмент            | Описание                                     |
 | --------------------- | -------------------------------------------- |
-| `AddSignatureRequest` | Добавить запрос на подпись к файлу в объекте |
+| `AddSignatureRequest` | Добавить запрос на подпись к файлу в объекте (имя файла не найдено — ошибка) |
 
 
 ### Прочее
@@ -330,7 +374,7 @@ ExportCsv("tmp/filter_x.jsonl", "C:/result/docs.csv", "name,typeName,created")
 
 | Инструмент      | Описание                           |
 | --------------- | ---------------------------------- |
-| `InvokeCommand` | Вызвать команду серверного расширения Pilot Server (только заранее зарегистрированные команды) |
+| `InvokeCommand` | Вызвать команду серверного расширения Pilot Server (только заранее зарегистрированные команды); ждёт и возвращает результат до 15 с |
 
 
 ---

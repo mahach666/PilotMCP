@@ -3,6 +3,7 @@ using System.Text.Json.Nodes;
 namespace PilotMCP.Tests;
 
 [Collection("Pilot")]
+[Trait("Category", "Integration")]
 public class QueryToolsTests
 {
     private readonly McpTestClient _client;
@@ -135,5 +136,36 @@ public class QueryToolsTests
 
         result.AssertOk();
         Assert.Contains("Машины состояний", result.Message);
+    }
+
+    [Theory]
+    [InlineData("Search", "context", "not-a-guid")]
+    [InlineData("Search", "stateId", "not-a-guid")]
+    [InlineData("Search", "createdFrom", "garbage")]
+    [InlineData("Search", "attribute", "noequals")]
+    [InlineData("SearchByDate", "from", "garbage")]
+    [InlineData("SearchByDate", "to", "garbage")]
+    [InlineData("GetChildren", "parentId", "00000000-0000-0000-0000-000000000000")]
+    public async Task InvalidFilterArgument_ReturnsError(string tool, string arg, string value)
+    {
+        var result = await _client.CallToolAsync(tool, new JsonObject { [arg] = value });
+        result.AssertError();
+    }
+
+    [Fact]
+    public async Task SearchByText_WithLuceneSpecials_DoesNotFailAsSyntaxError()
+    {
+        var result = await _client.CallToolAsync("SearchByText", new JsonObject { ["text"] = "a:b (" });
+        result.AssertOk();
+        Assert.Equal(0, result.Count);
+    }
+
+    [Fact]
+    public async Task SearchByDate_DateOnlyUpperBound_IsAccepted()
+    {
+        var result = await _client.CallToolAsync("SearchByDate", new JsonObject
+        { ["from"] = "2000-01-01", ["to"] = "2100-01-01", ["maxResults"] = 3 });
+        result.AssertOk();
+        Assert.True(result.Count > 0);
     }
 }

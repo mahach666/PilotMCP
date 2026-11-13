@@ -361,3 +361,7 @@ MigrationBackup/
 
 # Fody - auto-generated XML schema
 FodyWeavers.xsd
+
+# Документация (docfx): сайт и сгенерированный справочник инструментов
+_site/
+docs/tools/

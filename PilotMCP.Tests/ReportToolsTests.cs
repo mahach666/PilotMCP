@@ -4,6 +4,7 @@ using System.Text.RegularExpressions;
 namespace PilotMCP.Tests;
 
 [Collection("Pilot")]
+[Trait("Category", "Integration")]
 public class ReportToolsTests
 {
     private readonly McpTestClient _client;
@@ -109,5 +110,17 @@ public class ReportToolsTests
         });
 
         result.AssertError();
+    }
+
+    [Fact]
+    public async Task GetReportSample_WithPathSegments_ReturnsError()
+    {
+        var result = await _client.CallToolAsync("GetReportSample", new JsonObject
+        {
+            ["sampleName"] = "../../secret"
+        });
+
+        result.AssertError();
+        Assert.Contains("путь", result.Message);
     }
 }

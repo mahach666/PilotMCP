@@ -1,0 +1,141 @@
+name: Release
+
+# Релиз по тегу vX.Y.Z (semver, допускается суффикс -beta.1):
+#   1) unit-тесты, сборка zip-архивов win-x64 (PackReleaseArchives в PilotMCP.csproj);
+#   2) MCPB-бандл из self-contained сборки (установка в Claude Desktop);
+#   3) GitHub Release с архивами и .mcpb;
+#   4) публикация метаданных в официальный MCP Registry (OIDC, без секретов).
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    permissions:
+      contents: write # создание GitHub Release
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "lts/*"
+
+      - name: Version from tag
+        id: ver
+        run: |
+          $tag = "${{ github.ref_name }}"
+          if ($tag -notmatch '^v(\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?)$') { throw "Тег '$tag' должен иметь вид vX.Y.Z" }
+          $v = $Matches[1]
+          "version=$v" >> $env:GITHUB_OUTPUT
+          "prerelease=$([bool]($v -match '-'))".ToLower() >> $env:GITHUB_OUTPUT
+
+      - name: Unit tests
+        run: dotnet test PilotMCP.Tests/PilotMCP.Tests.csproj -c Release --nologo --filter "Category!=Integration"
+
+      - name: Build release archives
+        run: dotnet build PilotMCP.csproj -c Release --nologo -p:Version=${{ steps.ver.outputs.version }}
+
+      - name: Build MCPB bundle
+        id: mcpb
+        run: |
+          $v = "${{ steps.ver.outputs.version }}"
+          $sc = "artifacts/PilotMCP-v$v-win-x64-selfcontained.zip"
+          if (-not (Test-Path $sc)) { throw "Нет $sc" }
+
+          New-Item -ItemType Directory -Force mcpb-build/server | Out-Null
+          Expand-Archive $sc -DestinationPath mcpb-build/server -Force
+          $m = Get-Content mcpb/manifest.json -Raw | ConvertFrom-Json
+          $m.version = $v
+          $m | ConvertTo-Json -Depth 20 | Set-Content mcpb-build/manifest.json -Encoding utf8NoBOM
+
+          npm install -g @anthropic-ai/mcpb@2.1.2
+          mcpb validate mcpb-build/manifest.json
+          if ($LASTEXITCODE -ne 0) { throw "mcpb validate failed" }
+          $out = "artifacts/PilotMCP-v$v-win-x64.mcpb"
+          mcpb pack mcpb-build $out
+          if ($LASTEXITCODE -ne 0) { throw "mcpb pack failed" }
+
+          $sha = (Get-FileHash $out -Algorithm SHA256).Hash.ToLowerInvariant()
+          "sha256=$sha" >> $env:GITHUB_OUTPUT
+          "file=$out" >> $env:GITHUB_OUTPUT
+
+      - name: Prepare server.json for MCP Registry
+        run: |
+          $v = "${{ steps.ver.outputs.version }}"
+          $s = Get-Content server.json -Raw | ConvertFrom-Json
+          $s.version = $v
+          $p = $s.packages[0]
+          $p.version = $v
+          $p.identifier = "https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/PilotMCP-v$v-win-x64.mcpb"
+          $p.fileSha256 = "${{ steps.mcpb.outputs.sha256 }}"
+          New-Item -ItemType Directory -Force registry | Out-Null
+          $s | ConvertTo-Json -Depth 20 | Set-Content registry/server.json -Encoding utf8NoBOM
+          Get-Content registry/server.json
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $v = "${{ steps.ver.outputs.version }}"
+          $files = @("artifacts/PilotMCP-v$v-win-x64.zip", "artifacts/PilotMCP-v$v-win-x64-selfcontained.zip", "${{ steps.mcpb.outputs.file }}")
+          $ghArgs = @("release", "create", "${{ github.ref_name }}") + $files + @("--title", "PilotMCP ${{ github.ref_name }}", "--generate-notes")
+          if ("${{ steps.ver.outputs.prerelease }}" -eq "true") { $ghArgs += "--prerelease" }
+          gh @ghArgs
+          if ($LASTEXITCODE -ne 0) { throw "gh release create failed" }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: registry-server-json
+          path: registry/server.json
+
+  publish-registry:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write # OIDC-вход в MCP Registry
+      contents: read
+    env:
+      MCP_PUBLISHER_VERSION: v1.8.9
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: registry-server-json
+
+      # Шаги ниже — из официальной документации MCP Registry (modelcontextprotocol.io/registry/github-actions)
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      - name: Download and verify mcp-publisher
+        run: |
+          set -euo pipefail
+          os="$(uname -s | tr '[:upper:]' '[:lower:]')"
+          arch="$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')"
+          archive="mcp-publisher_${os}_${arch}.tar.gz"
+          base_url="https://github.com/modelcontextprotocol/registry/releases/download/${MCP_PUBLISHER_VERSION}"
+
+          curl --fail --location --silent --show-error --output "$archive" "$base_url/$archive"
+          curl --fail --location --silent --show-error --output "$archive.sigstore.json" "$base_url/$archive.sigstore.json"
+          cosign verify-blob \
+            --bundle "$archive.sigstore.json" \
+            --certificate-identity "https://github.com/modelcontextprotocol/registry/.github/workflows/release.yml@refs/tags/${MCP_PUBLISHER_VERSION}" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            "$archive"
+          tar xzf "$archive" mcp-publisher
+          rm -f "$archive" "$archive.sigstore.json"
+
+      - name: Authenticate to MCP Registry
+        run: ./mcp-publisher login github-oidc
+
+      - name: Publish server to MCP Registry
+        run: ./mcp-publisher publish

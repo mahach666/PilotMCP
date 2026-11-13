@@ -33,6 +33,34 @@ public class ObjectTools
     private readonly PilotConnection _connection;
     public ObjectTools(PilotConnection connection) => _connection = connection;
 
+    private async Task<DObject?> LoadObject(Guid id)
+    {
+        var objects = await _connection.ServerApi.GetObjectsAsync(new[] { id });
+        return objects != null && objects.Count > 0 ? objects[0] : null;
+    }
+
+    /// <summary>Меняет состояние объекта, только если текущее состояние входит в allowedFrom.</summary>
+    private async Task<string> ChangeState(
+        string objectId, ObjectState[] allowedFrom, Action<Ascon.Pilot.DataModifier.IObjectChangeBuilder> change, string okMessage)
+    {
+        if (!Guid.TryParse(objectId, out var guid))
+            return ToolResult.Error($"Некорректный GUID: {objectId}");
+
+        var obj = await LoadObject(guid);
+        if (obj == null)
+            return ToolResult.Error($"Объект {objectId} не найден.");
+
+        var current = obj.StateInfo?.State ?? ObjectState.Alive;
+        if (!allowedFrom.Contains(current))
+            return ToolResult.Error(
+                $"Операция недоступна: текущее состояние объекта {current}, допустимо: {string.Join(", ", allowedFrom)}.");
+
+        var modifier = _connection.CreateModifier();
+        change(modifier.EditObject(guid));
+        if (modifier.AnyChanges()) _connection.ApplyAndWait(() => modifier.Apply(null));
+        return ToolResult.Ok(okMessage);
+    }
+
     [McpServerTool, Description("Получить один объект по GUID. brief=true для краткой сводки (id, тип, имя, количество детей/файлов). Для массовых запросов используйте search или get_children.")]
     public Task<string> GetObject(
         [Description("GUID идентификатор объекта")] string objectId,
@@ -64,7 +92,7 @@ public class ObjectTools
         return FormatType(type);
     }
 
-    [McpServerTool, Description("Создать новый объект в Pilot с одним начальным атрибутом. Для установки дополнительных атрибутов вызовите SetAttribute несколько раз.")]
+    [McpServerTool, Description("Создать новый объект в Pilot с одним начальным атрибутом. Атрибут должен быть определён в типе; значение разбирается по типу атрибута (числа и даты — в инвариантном формате, например 12.5 и 2025-01-31T10:00:00Z; Boolean — true/false; OrgUnit — id через запятую). Для установки дополнительных атрибутов вызовите SetAttribute несколько раз.")]
     public Task<string> CreateObject(
         [Description("GUID родительского объекта. Корень базы: 00000001-0001-0001-0001-000000000001")] string parentId,
         [Description("Системное имя типа объекта")] string typeName,
@@ -81,9 +109,14 @@ public class ObjectTools
             if (type == null)
                 return ToolResult.Error($"Тип '{typeName}' не найден.");
 
+            var attr = type.Attributes.FirstOrDefault(a => a.Name == attributeName);
+            if (attr == null)
+                return ToolResult.Error(
+                    $"Атрибут '{attributeName}' не определён в типе '{type.Name}'. Доступные: {string.Join(", ", type.Attributes.Select(a => a.Name))}");
+
             var attrs = new Dictionary<string, DValue>
             {
-                [attributeName] = new DValue { StrValue = attributeValue }
+                [attributeName] = Helpers.BuildTypedValue(attr, attributeValue)
             };
             var newId = Helpers.CreateChildObject(_connection, parentGuid, type.Id, attrs);
             return ToolResult.Ok($"Объект создан. ID: {newId}");
@@ -123,7 +156,7 @@ public class ObjectTools
         });
     }
 
-    [McpServerTool, Description("Установить значение одного атрибута объекта. Для изменения нескольких атрибутов вызовите этот инструмент несколько раз.")]
+    [McpServerTool, Description("Установить значение одного атрибута объекта. Значение разбирается по типу атрибута (числа и даты — в инвариантном формате, например 12.5 и 2025-01-31T10:00:00Z; Boolean — true/false; UserState — GUID; OrgUnit — id через запятую; Array — значения через ';'). Неизвестное имя атрибута — ошибка. Для изменения нескольких атрибутов вызовите этот инструмент несколько раз.")]
     public Task<string> SetAttribute(
         [Description("GUID объекта")] string objectId,
         [Description("Имя атрибута, например: code, name, title")] string attributeName,
@@ -134,10 +167,25 @@ public class ObjectTools
             if (!Guid.TryParse(objectId, out var guid))
                 return ToolResult.Error($"Некорректный GUID: {objectId}");
 
+            var obj = await LoadObject(guid);
+            if (obj == null)
+                return ToolResult.Error($"Объект {objectId} не найден.");
+
+            var type = _connection.Metadata.Types.FirstOrDefault(t => t.Id == obj.TypeId);
+            var attr = type?.Attributes.FirstOrDefault(a => a.Name == attributeName);
+            if (attr == null)
+            {
+                // Служебные атрибуты, которых нет в типе, но уже есть у объекта, оставляем строковыми, как раньше.
+                if (!obj.Attributes.ContainsKey(attributeName))
+                    return ToolResult.Error(
+                        $"Атрибут '{attributeName}' не определён в типе объекта. Доступные: {string.Join(", ", type?.Attributes.Select(a => a.Name) ?? Array.Empty<string>())}");
+                attr = new MAttribute { Name = attributeName, Type = MAttrType.String };
+            }
+
             var modifier = _connection.CreateModifier();
-            modifier.EditObject(guid).SetAttribute(attributeName, new DValue { StrValue = attributeValue });
+            modifier.EditObject(guid).SetAttribute(attributeName, Helpers.BuildTypedValue(attr, attributeValue));
             if (modifier.AnyChanges())
-                modifier.Apply(null);
+                _connection.ApplyAndWait(() => modifier.Apply(null));
 
             return ToolResult.Ok($"Атрибут \"{attributeName}\" объекта {objectId} установлен в \"{attributeValue}\".");
         });
@@ -155,7 +203,7 @@ public class ObjectTools
             var modifier = _connection.CreateModifier();
             modifier.MoveToRecycleBin(guid, _connection.StorageProvider);
             if (modifier.AnyChanges())
-                modifier.Apply(null);
+                _connection.ApplyAndWait(() => modifier.Apply(null));
 
             return ToolResult.Ok($"Объект {objectId} удалён (перемещён в корзину).");
         });
@@ -186,7 +234,7 @@ public class ObjectTools
             var modifier = _connection.CreateModifier();
             modifier.MoveFromRecycleBin(guid, parentId);
             if (modifier.AnyChanges())
-                modifier.Apply(null);
+                _connection.ApplyAndWait(() => modifier.Apply(null));
 
             return ToolResult.Ok($"Объект {objectId} восстановлен из корзины.");
         });
@@ -219,74 +267,56 @@ public class ObjectTools
             if (!Guid.TryParse(newParentId, out var parentGuid))
                 return ToolResult.Error($"Некорректный GUID родителя: {newParentId}");
 
+            var found = await _connection.ServerApi.GetObjectsAsync(new[] { guid, parentGuid });
+            if (found.All(o => o.Id != guid))
+                return ToolResult.Error($"Объект {objectId} не найден.");
+            if (found.All(o => o.Id != parentGuid))
+                return ToolResult.Error($"Новый родитель {newParentId} не найден.");
+
             var modifier = _connection.CreateModifier();
             modifier.Move(guid, parentGuid);
-            if (modifier.AnyChanges()) modifier.Apply(null);
+            if (modifier.AnyChanges()) _connection.ApplyAndWait(() => modifier.Apply(null));
             return ToolResult.Ok($"Объект {objectId} перемещён в {newParentId}.");
         });
     }
 
-    [McpServerTool, Description("Заблокировать объект (запросить блокировку для эксклюзивного редактирования).")]
+    [McpServerTool, Description("Заблокировать объект (запросить блокировку для эксклюзивного редактирования). Доступно только для объекта в состоянии Alive.")]
     public Task<string> LockObject(
         [Description("GUID объекта")] string objectId)
     {
         return ToolRunner.RunWriteAsync(_connection, "LockObject", $"obj={objectId}", async () =>
         {
-            if (!Guid.TryParse(objectId, out var guid))
-                return ToolResult.Error($"Некорректный GUID: {objectId}");
-
-            var modifier = _connection.CreateModifier();
-            modifier.EditObject(guid).Lock();
-            if (modifier.AnyChanges()) modifier.Apply(null);
-            return ToolResult.Ok($"Объект {objectId} заблокирован.");
+            return await ChangeState(objectId, new[] { ObjectState.Alive }, b => b.Lock(), $"Объект {objectId} заблокирован.");
         });
     }
 
-    [McpServerTool, Description("Разблокировать объект.")]
+    [McpServerTool, Description("Разблокировать объект. Доступно только для объекта в состоянии LockRequested или LockAccepted (замороженный объект разморозьте через UnfreezeObject).")]
     public Task<string> UnlockObject(
         [Description("GUID объекта")] string objectId)
     {
         return ToolRunner.RunWriteAsync(_connection, "UnlockObject", $"obj={objectId}", async () =>
         {
-            if (!Guid.TryParse(objectId, out var guid))
-                return ToolResult.Error($"Некорректный GUID: {objectId}");
-
-            var modifier = _connection.CreateModifier();
-            modifier.EditObject(guid).Unlock();
-            if (modifier.AnyChanges()) modifier.Apply(null);
-            return ToolResult.Ok($"Объект {objectId} разблокирован.");
+            return await ChangeState(objectId, new[] { ObjectState.LockRequested, ObjectState.LockAccepted }, b => b.Unlock(), $"Объект {objectId} разблокирован.");
         });
     }
 
-    [McpServerTool, Description("Заморозить объект (запретить редактирование).")]
+    [McpServerTool, Description("Заморозить объект (запретить редактирование). Доступно только для объекта в состоянии Alive.")]
     public Task<string> FreezeObject(
         [Description("GUID объекта")] string objectId)
     {
         return ToolRunner.RunWriteAsync(_connection, "FreezeObject", $"obj={objectId}", async () =>
         {
-            if (!Guid.TryParse(objectId, out var guid))
-                return ToolResult.Error($"Некорректный GUID: {objectId}");
-
-            var modifier = _connection.CreateModifier();
-            modifier.EditObject(guid).SetState(ObjectState.Frozen);
-            if (modifier.AnyChanges()) modifier.Apply(null);
-            return ToolResult.Ok($"Объект {objectId} заморожен.");
+            return await ChangeState(objectId, new[] { ObjectState.Alive }, b => b.SetState(ObjectState.Frozen), $"Объект {objectId} заморожен.");
         });
     }
 
-    [McpServerTool, Description("Разморозить объект (разрешить редактирование).")]
+    [McpServerTool, Description("Разморозить объект (разрешить редактирование). Доступно только для замороженного объекта (состояние Frozen).")]
     public Task<string> UnfreezeObject(
         [Description("GUID объекта")] string objectId)
     {
         return ToolRunner.RunWriteAsync(_connection, "UnfreezeObject", $"obj={objectId}", async () =>
         {
-            if (!Guid.TryParse(objectId, out var guid))
-                return ToolResult.Error($"Некорректный GUID: {objectId}");
-
-            var modifier = _connection.CreateModifier();
-            modifier.EditObject(guid).SetState(ObjectState.Alive);
-            if (modifier.AnyChanges()) modifier.Apply(null);
-            return ToolResult.Ok($"Объект {objectId} разморожен.");
+            return await ChangeState(objectId, new[] { ObjectState.Frozen }, b => b.SetState(ObjectState.Alive), $"Объект {objectId} разморожен.");
         });
     }
 
@@ -301,7 +331,7 @@ public class ObjectTools
 
             var modifier = _connection.CreateModifier();
             modifier.EditObject(guid).MakeSecret();
-            if (modifier.AnyChanges()) modifier.Apply(null);
+            if (modifier.AnyChanges()) _connection.ApplyAndWait(() => modifier.Apply(null));
             return ToolResult.Ok($"Объект {objectId} помечен как секретный.");
         });
     }
@@ -317,7 +347,7 @@ public class ObjectTools
 
             var modifier = _connection.CreateModifier();
             modifier.EditObject(guid).MakePublic();
-            if (modifier.AnyChanges()) modifier.Apply(null);
+            if (modifier.AnyChanges()) _connection.ApplyAndWait(() => modifier.Apply(null));
             return ToolResult.Ok($"Секретность объекта {objectId} снята.");
         });
     }
@@ -336,7 +366,7 @@ public class ObjectTools
 
             var modifier = _connection.CreateModifier();
             modifier.EditObject(objGuid).DeleteFile(fGuid);
-            if (modifier.AnyChanges()) modifier.Apply(null);
+            if (modifier.AnyChanges()) _connection.ApplyAndWait(() => modifier.Apply(null));
             return ToolResult.Ok($"Файл {fileId} удалён из объекта {objectId}.");
         });
     }
@@ -354,7 +384,7 @@ public class ObjectTools
             if (personId == 0) personId = _connection.CurrentPersonId;
             var modifier = _connection.CreateModifier();
             modifier.EditObject(guid).AddSubscriber(personId);
-            if (modifier.AnyChanges()) modifier.Apply(null);
+            if (modifier.AnyChanges()) _connection.ApplyAndWait(() => modifier.Apply(null));
             return ToolResult.Ok($"Пользователь #{personId} подписан на объект {objectId}.");
         });
     }
@@ -372,7 +402,7 @@ public class ObjectTools
             if (personId == 0) personId = _connection.CurrentPersonId;
             var modifier = _connection.CreateModifier();
             modifier.EditObject(guid).RemoveSubscriber(personId);
-            if (modifier.AnyChanges()) modifier.Apply(null);
+            if (modifier.AnyChanges()) _connection.ApplyAndWait(() => modifier.Apply(null));
             return ToolResult.Ok($"Пользователь #{personId} отписан от объекта {objectId}.");
         });
     }
@@ -411,7 +441,7 @@ public class ObjectTools
                     $"Нет изменений для применения. Текущее состояние атрибута '{stateAttributeName}': {currentStateStr}. " +
                     $"Запрошенное: {stateGuid}. Возможно, состояние уже установлено.");
 
-            var changesetId = modifier.Apply(null);
+            var changesetId = _connection.ApplyAndWait(() => modifier.Apply(null));
 
             var updated = await _connection.ServerApi.GetObjectsAsync(new[] { guid });
             if (updated != null && updated.Count > 0)
@@ -432,7 +462,7 @@ public class ObjectTools
         });
     }
 
-    [McpServerTool, Description("Проверить размер файла в архиве Pilot (без скачивания).")]
+    [McpServerTool, Description("Определить размер файла в архиве Pilot по Body.Id. Размер считается чтением содержимого по частям (на диск ничего не сохраняется), поэтому для больших файлов может занять время. Несуществующий или пустой файл — ошибка.")]
     public string GetFileSize(
         [Description("GUID тела файла (Body.Id)")] string fileBodyId)
     {
@@ -441,8 +471,10 @@ public class ObjectTools
             if (!Guid.TryParse(fileBodyId, out var bodyId))
                 return ToolResult.Error($"Некорректный GUID: {fileBodyId}");
 
-            var position = _connection.FileApi.GetFilePosition(bodyId);
-            return ToolResult.Ok($"Размер файла {fileBodyId} в архиве: {position} байт ({position / 1024} KB).");
+            var size = Helpers.MeasureArchiveFile(_connection.FileApi, bodyId);
+            if (size == 0)
+                return ToolResult.Error($"Файл {fileBodyId} в архиве не найден или пуст (прочитано 0 байт).");
+            return ToolResult.Ok($"Размер файла {fileBodyId} в архиве: {size} байт.");
         });
     }
 
@@ -613,7 +645,7 @@ public class ObjectTools
         var sb = new StringBuilder();
         sb.AppendLine($"# Тип: {type.Name} (ID: {type.Id})");
         sb.AppendLine($"Заголовок: {type.Title}");
-        sb.AppendLine($"Файловый: {type.HasFiles}, Проектный: {type.IsProjectFolder}");
+        sb.AppendLine($"Файловый: {type.HasFiles}, Проектный: {type.IsProjectFolder()}");
         if (type.Attributes.Any())
         {
             sb.AppendLine("\n## Атрибуты:");
@@ -632,7 +664,7 @@ public class SignatureTools
     public SignatureTools(PilotConnection connection) => _connection = connection;
 
     [McpServerTool, Description(
-        "Добавить запрос на подпись к файлу в объекте.")]
+        "Добавить запрос на подпись к файлу в актуальной версии объекта. Если fileName не найден среди файлов объекта — ошибка со списком файлов.")]
     public Task<string> AddSignatureRequest(
         [Description("GUID объекта")] string objectId,
         [Description("ID позиции подписанта (positionId)")] int positionId,
@@ -657,6 +689,10 @@ public class SignatureTools
                 ? _ => true
                 : f => f.Name.Equals(fileName, StringComparison.OrdinalIgnoreCase);
 
+            if (!obj.ActualFileSnapshot.Files.Any(f => findFile(f)))
+                return ToolResult.Error(
+                    $"Файл '{fileName}' не найден в актуальной версии объекта. Файлы: {string.Join(", ", obj.ActualFileSnapshot.Files.Select(f => f.Name))}");
+
             var request = new Ascon.Pilot.DataClasses.DSignatureRequest
             {
                 Id = Guid.NewGuid(),
@@ -668,7 +704,9 @@ public class SignatureTools
 
             var modifier = _connection.CreateModifier();
             modifier.EditObject(guid).AddSignatureRequest(findFile, request);
-            if (modifier.AnyChanges()) modifier.Apply(null);
+            if (!modifier.AnyChanges())
+                return ToolResult.Error("Нет изменений для применения: запрос на подпись не добавлен.");
+            _connection.ApplyAndWait(() => modifier.Apply(null));
             return ToolResult.Ok($"Запрос на подпись добавлен: позиция #{positionId}, роль: {role}.");
         });
     }

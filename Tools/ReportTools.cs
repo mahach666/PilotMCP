@@ -251,16 +251,21 @@ public class ReportTools
             Directory.CreateDirectory(Path.GetDirectoryName(tempPath)!);
             File.WriteAllText(tempPath, repxContent, Encoding.UTF8);
 
-            var docInfo = new Ascon.Pilot.DataModifier.DocumentInfo(tempPath);
-            var modifier = _connection.CreateModifier();
-            modifier.EditObject(guid)
-                .CreateSnapshot("Report updated via MCP")
-                .AddFile(docInfo, _connection.StorageProvider);
+            try
+            {
+                var docInfo = new Ascon.Pilot.DataModifier.DocumentInfo(tempPath, repxFile.Name);
+                var modifier = _connection.CreateModifier();
+                modifier.EditObject(guid)
+                    .CreateSnapshot("Report updated via MCP")
+                    .AddFile(docInfo, _connection.StorageProvider);
 
-            if (modifier.AnyChanges())
-                modifier.Apply(null);
-
-            try { File.Delete(tempPath); } catch { }
+                if (modifier.AnyChanges())
+                    _connection.ApplyAndWait(() => modifier.Apply(null));
+            }
+            finally
+            {
+                DeleteTemp(tempPath);
+            }
 
             return ToolResult.Ok($"Отчёт {repxFile.Name} обновлён ({repxContent.Length} символов).");
         });
@@ -333,20 +338,34 @@ public class ReportTools
             File.WriteAllText(tempPath, repxContent, Encoding.UTF8);
 
             var newId = Guid.NewGuid();
-            var docInfo = new Ascon.Pilot.DataModifier.DocumentInfo(tempPath);
-            var modifier = _connection.CreateModifier();
-            modifier.CreateObject(newId, parentGuid, typeId)
-                .SetAttribute(ReportNameAttribute, new DValue { StrValue = reportName })
-                .AddFile(docInfo, _connection.StorageProvider);
+            try
+            {
+                var docInfo = new Ascon.Pilot.DataModifier.DocumentInfo(tempPath, fileName);
+                var modifier = _connection.CreateModifier();
+                modifier.CreateObject(newId, parentGuid, typeId)
+                    .SetAttribute(ReportNameAttribute, new DValue { StrValue = reportName })
+                    .AddFile(docInfo, _connection.StorageProvider);
 
-            if (modifier.AnyChanges())
-                modifier.Apply(null);
-
-            try { File.Delete(tempPath); } catch { }
+                if (modifier.AnyChanges())
+                    _connection.ApplyAndWait(() => modifier.Apply(null));
+            }
+            finally
+            {
+                DeleteTemp(tempPath);
+            }
 
             return ToolResult.Ok(
                 $"Отчёт создан: {reportName}\nID: {newId}\nФайл: {fileName}");
         });
+    }
+
+    private static void DeleteTemp(string path)
+    {
+        try { File.Delete(path); }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            ToolLogger.Log("ReportTools", "delete", $"Не удалось удалить {path}: {ex.Message}");
+        }
     }
 
     [McpServerTool, Description(
@@ -389,6 +408,9 @@ public class ReportTools
         {
             if (!Directory.Exists(SamplesDir))
                 return ToolResult.Error($"Папка с примерами не найдена: {SamplesDir}");
+
+            if (string.IsNullOrWhiteSpace(sampleName) || Path.GetFileName(sampleName) != sampleName)
+                return ToolResult.Error("Имя примера не должно содержать путь.");
 
             var path = Path.Combine(SamplesDir, sampleName + ".repx");
             if (!File.Exists(path))

@@ -3,6 +3,7 @@ using System.Text.Json.Nodes;
 namespace PilotMCP.Tests;
 
 [Collection("Pilot")]
+[Trait("Category", "Integration")]
 public class MiscToolsTests
 {
     private readonly McpTestClient _client;
@@ -71,6 +72,18 @@ public class MiscToolsTests
         });
 
         result.AssertOk();
+    }
+
+    [Fact]
+    public async Task GetChangesets_TooWideRange_ReturnsError()
+    {
+        var result = await _client.CallToolAsync("GetChangesets", new JsonObject
+        {
+            ["first"] = 1,
+            ["last"] = 100000
+        });
+
+        result.AssertError();
     }
 
     // ── PeopleTools ──

@@ -3,6 +3,7 @@ using System.Text.Json.Nodes;
 namespace PilotMCP.Tests;
 
 [Collection("Pilot")]
+[Trait("Category", "Integration")]
 public class DocumentToolsTests
 {
     private readonly McpTestClient _client;
@@ -33,6 +34,33 @@ public class DocumentToolsTests
         });
 
         result.AssertError();
+    }
+
+    [Fact]
+    public async Task FindTextOnPage_WithEmptyText_ReturnsError()
+    {
+        var result = await _client.CallToolAsync("FindTextOnPage", new JsonObject
+        {
+            ["documentId"] = Guid.NewGuid().ToString(),
+            ["searchText"] = ""
+        });
+
+        result.AssertError();
+        Assert.Contains("пустым", result.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(10000)]
+    public async Task GetDocumentPageImage_WithDpiOutOfRange_ReturnsError(int dpi)
+    {
+        var result = await _client.CallToolAsync("GetDocumentPageImage", new JsonObject
+        {
+            ["documentId"] = Guid.NewGuid().ToString(),
+            ["dpi"] = dpi
+        });
+
+        Assert.Contains("dpi должен быть", result.Message, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]

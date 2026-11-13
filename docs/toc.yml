@@ -1,0 +1,14 @@
+- name: Главная
+  href: index.md
+- name: Быстрый старт
+  href: getting-started.md
+- name: Конфигурация
+  href: configuration.md
+- name: Замечания
+  href: annotations.md
+- name: Инструменты
+  href: tools/
+- name: Архитектура
+  href: architecture.md
+- name: Разработка
+  href: development.md

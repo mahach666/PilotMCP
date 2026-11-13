@@ -2,12 +2,16 @@
 
 MCP-сервер для работы с Pilot через Server API. Позволяет LLM-агентам подключаться к серверу Pilot, выполнять поиск, создавать и изменять объекты, работать с документами, историей изменений, правами доступа и чатами.
 
+Документация: https://mahach666.github.io/PilotMCP/
+
 ## Требования
 
 - .NET 8.0
 - Доступ к серверу Pilot
 
 ## Установка
+
+Подробнее об установке и настройке клиентов — в [документации](https://mahach666.github.io/PilotMCP/getting-started.html).
 
 Готовые сборки (Windows x64) — на странице [Releases](https://github.com/mahach666/PilotMCP/releases):
 

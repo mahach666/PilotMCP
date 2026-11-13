@@ -19,6 +19,9 @@
     <Compile Remove="PilotMCP.Tests\**" />
     <Content Remove="PilotMCP.Tests\**" />
     <None Remove="PilotMCP.Tests\**" />
+    <Compile Remove="DocGen\**" />
+    <Content Remove="DocGen\**" />
+    <None Remove="DocGen\**" />
   </ItemGroup>
 
   <ItemGroup>
